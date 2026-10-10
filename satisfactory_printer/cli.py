@@ -40,12 +40,17 @@ def _cmd_build(args: argparse.Namespace) -> int:
         lo = pts.min(axis=0)
         factor = args.scale if args.scale else (args.size / float((pts.max(axis=0) - lo).max()) if args.size else 1.0)
         segs = [((a - lo) * factor, (b - lo) * factor) for a, b in segs]
-        beams = beam_mod.beams_from_segments(segs, max_len)
-        beams = [b for b in beams if b.length >= args.min_length]
+        if args.directions == "26":
+            beams = beam_mod.beams_from_segments_lattice(segs, max_len)
+        else:
+            beams = beam_mod.beams_from_segments(segs, max_len)
+            beams = [b for b in beams if b.length >= args.min_length]
     else:
         tris = scale_to_grid(load_mesh(src), size=args.size, scale=args.scale)
         if args.mode == "wireframe":
-            beams = beam_mod.beams_from_mesh_edges(tris, max_len, args.feature_angle)
+            beams = beam_mod.beams_from_mesh_edges(
+                tris, max_len, args.feature_angle, lattice=args.directions == "26"
+            )
         else:
             if args.mode == "surface":
                 grid = voxelize_surface(tris)
@@ -118,7 +123,12 @@ def main(argv: list[str] | None = None) -> int:
     b.add_argument("--solid", action="store_true", help="voxel mode: keep interior (default hollows the model)")
     b.add_argument("--axis", choices=["auto", "x", "y", "z"], default="auto", help="beam direction in voxel mode")
     b.add_argument("--feature-angle", type=float, default=1.0, help="wireframe: skip edges flatter than this")
-    b.add_argument("--min-length", type=float, default=1.0, help="G-code: drop beams shorter than this")
+    b.add_argument("--directions", choices=["26", "free"], default="26",
+                   help="G-code/wireframe: '26' snaps every path to the 1 m grid and only allows the 26 "
+                        "directions of a 1x1x1 cube (edges, face and space diagonals); 'free' allows any "
+                        "integer vector")
+    b.add_argument("--min-length", type=float, default=1.0, help="G-code with --directions free: "
+                   "drop beams shorter than this")
     b.add_argument("--max-beam-length", type=float, help="override config max_beam_length")
     b.add_argument("--limit", type=int, help="only emit the first N beams (for testing)")
     b.add_argument("-c", "--config", help="JSON config overriding the defaults (see config.example.json)")

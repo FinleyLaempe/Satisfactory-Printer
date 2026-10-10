@@ -65,19 +65,47 @@ python -m satisfactory_printer run out/plan.json --start-at 120   # resume after
 |--------------------|-----------------------------------------------------------------|
 | `voxel` (default)  | the model filled with 1×1 beams, hollowed to a 1 m shell (`--solid` keeps the inside). Beams run along the axis that needs the fewest, or the one set by `--axis` |
 | `surface`          | a shell from meshes that aren't watertight                      |
-| `wireframe`        | one beam per mesh edge. Flat-face diagonals are skipped         |
-| G-code input       | the slicer's toolpaths as beams                                 |
+| `wireframe`        | one beam per mesh edge, snapped to the 26 cube directions (`--directions free` for exact angles). Flat-face diagonals are skipped |
+| G-code input       | the slicer's toolpaths as beams on the 1 m grid (see below)     |
 
-### Using a slicer
+### Using a slicer (e.g. a non-planar slicer like Unlayered)
 
-Any slicer can act as the path planner. Slice the model normally (Cura, PrusaSlicer,
-OrcaSlicer), then feed the `.gcode` to `build`. A good starting point is a layer height and
-line width of `1 / scale` mm, so one extruded line is one beam wide. Use 0–15 % infill or
-vase mode, or you'll get thousands of beams.
+Treat the slicer as the path planner and this tool as the "printer firmware" for
+Satisfactory. Every extruding `G1` move becomes a beam; travel moves (`G0`, or no extrusion)
+are skipped.
 
-A **non-planar** ("unlayered") slicer also works: its moves change Z mid-layer, and those
-moves become sloped beams. That suits this approach, because a nudged beam can point in any
-direction.
+By default (`--directions 26`) every path is restricted to the **1×1×1 m grid** and to
+**straight lines in the 26 directions of a cube**:
+
+| step              | example vector | beam length per step |
+|-------------------|----------------|----------------------|
+| cube edge         | `(1, 0, 0)`    | 1.00 m               |
+| face diagonal     | `(1, 1, 0)`    | 1.41 m               |
+| space diagonal    | `(1, 1, 1)`    | 1.73 m               |
+
+Each path is traced through the grid (3D DDA), then consecutive steps in the same direction
+are merged into one long beam (split at `max_beam_length`). Overlapping paths are only built
+once. Lines that don't fit a cube direction become a staircase of allowed steps, and curves
+become chains of short pieces. That's why a non-planar slicer helps: paths that climb in
+X, Y and Z at the same time come out as true 3D diagonals instead of layer steps.
+`--directions free` allows any integer vector instead.
+
+Slicer settings that suit this (1 grid cell = `1 / scale` mm):
+
+- **Line width ≈ layer height ≈ 1 / scale mm.** With `--scale 0.1`, slice with 10 mm lines,
+  or scale the model in the slicer so 1 mm = 1 beam and use `--scale 1`.
+- **One wall/perimeter** and **0 % infill**, or a sparse straight-line pattern (rectilinear,
+  grid, or 3D "cubic"-like infill) at a large spacing. Gyroid or other curved infill
+  becomes lots of tiny pieces.
+- **No top/bottom solid layers**, no brim/skirt/support (or delete them from the G-code).
+- **Absolute XYZ** (`G90`). Absolute or relative E (`M82`/`M83`) both work.
+
+Try it with the bundled synthetic non-planar spiral:
+
+```
+python examples/make_examples.py
+python -m satisfactory_printer build examples/spiral.gcode --scale 1 -o out
+```
 
 ## Calibration (do this first, in a test world)
 

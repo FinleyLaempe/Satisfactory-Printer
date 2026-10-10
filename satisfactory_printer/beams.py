@@ -111,7 +111,9 @@ def beams_from_segments(segments: list[tuple[np.ndarray, np.ndarray]], max_len: 
     return out
 
 
-def beams_from_mesh_edges(tris: np.ndarray, max_len: float = 12, feature_angle: float = 1.0) -> list[Beam]:
+def beams_from_mesh_edges(
+    tris: np.ndarray, max_len: float = 12, feature_angle: float = 1.0, lattice: bool = False
+) -> list[Beam]:
     """Wireframe mode: one beam per mesh edge.
 
     Edges between nearly coplanar faces (dihedral angle below `feature_angle` degrees) are
@@ -136,7 +138,89 @@ def beams_from_mesh_edges(tris: np.ndarray, max_len: float = 12, feature_angle: 
         if len(normals) == 2 and abs(float(np.dot(normals[0], normals[1]))) >= cos_limit:
             continue
         segments.append((np.array(p), np.array(q)))
+    if lattice:
+        return beams_from_segments_lattice(segments, max_len)
     return beams_from_segments(segments, max_len)
+
+
+# --------------------------------------------------------------------------- 1 m lattice
+
+# The 13 canonical directions of a 1x1x1 cube (edges, face diagonals, space diagonals);
+# together with their negatives they are the 26 neighbour directions.
+LATTICE_DIRECTIONS: list[Vec] = [
+    (dx, dy, dz)
+    for dx in (-1, 0, 1)
+    for dy in (-1, 0, 1)
+    for dz in (-1, 0, 1)
+    if (dx, dy, dz) > (0, 0, 0)
+]
+
+
+def _canonical_step(step: Vec) -> tuple[Vec, bool]:
+    """Return (canonical direction, flipped?) for a unit lattice step."""
+    if step in _CANON:
+        return step, False
+    return tuple(-c for c in step), True  # type: ignore[return-value]
+
+
+_CANON = set(LATTICE_DIRECTIONS)
+
+
+def lattice_walk(start: np.ndarray, end: np.ndarray) -> list[Vec]:
+    """Trace a segment through the 1 m grid (3D DDA).
+
+    Consecutive points differ by at most 1 on every axis, i.e. each step is one of the 26
+    directions of a 1x1x1 cube.
+    """
+    start = np.asarray(start, dtype=float)
+    end = np.asarray(end, dtype=float)
+    n = max(int(math.ceil(float(np.abs(end - start).max()))), 1)
+    pts: list[Vec] = []
+    for k in range(n + 1):
+        # floor(x + 0.5) instead of round(): monotone, so steps never jump by 2
+        p = tuple(int(math.floor(c + 0.5)) for c in start + (end - start) * k / n)
+        if not pts or p != pts[-1]:
+            pts.append(p)  # type: ignore[arg-type]
+    return pts
+
+
+def beams_from_segments_lattice(
+    segments: list[tuple[np.ndarray, np.ndarray]], max_len: float = 12
+) -> list[Beam]:
+    """Restrict segments to the 1 m lattice and merge them into maximal straight beams.
+
+    Every beam starts and ends on a grid point and points along a cube edge, face diagonal
+    or space diagonal. Overlapping paths are de-duplicated at the 1-step level.
+    """
+    edges: dict[Vec, set[Vec]] = {d: set() for d in LATTICE_DIRECTIONS}
+    for a, b in segments:
+        pts = lattice_walk(a, b)
+        for p, q in zip(pts, pts[1:]):
+            step = tuple(qc - pc for pc, qc in zip(p, q))
+            d, flipped = _canonical_step(step)  # type: ignore[arg-type]
+            edges[d].add(q if flipped else p)
+
+    beams: list[Beam] = []
+    for d, starts in edges.items():
+        step_len = math.sqrt(sum(c * c for c in d))
+        max_steps = max(int(max_len / step_len + 1e-9), 1) if max_len > 0 else 10**9
+        for p in starts:
+            prev = tuple(pc - dc for pc, dc in zip(p, d))
+            if prev in starts:
+                continue  # not the beginning of a chain
+            length = 0
+            q = p
+            while q in starts:
+                q = tuple(qc + dc for qc, dc in zip(q, d))
+                length += 1
+            pos = 0
+            while pos < length:
+                n = min(max_steps, length - pos)
+                s = tuple(pc + dc * pos for pc, dc in zip(p, d))
+                e = tuple(pc + dc * (pos + n) for pc, dc in zip(p, d))
+                beams.append(Beam(s, e))  # type: ignore[arg-type]
+                pos += n
+    return beams
 
 
 # --------------------------------------------------------------------------- ordering

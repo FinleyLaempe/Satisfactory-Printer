@@ -40,8 +40,23 @@ def torus(R=1.0, r=0.35, nu=48, nv=24):
     return np.array(tris)
 
 
+def spiral_gcode(radius=8.0, height=12.0, turns=3, points_per_turn=24):
+    """A rising spiral like a non-planar slicer would emit: X, Y and Z change in every move."""
+    lines = ["; synthetic non-planar toolpath (units = mm, use --scale 1)", "G90", "M82", "G92 E0"]
+    n = turns * points_per_turn
+    e = 0.0
+    for k in range(n + 1):
+        a = 2 * np.pi * k / points_per_turn
+        x, y, z = radius * np.cos(a) + radius, radius * np.sin(a) + radius, height * k / n
+        cmd = "G0" if k == 0 else "G1"
+        e += 0 if k == 0 else 1
+        lines.append(f"{cmd} X{x:.3f} Y{y:.3f} Z{z:.3f}" + ("" if k == 0 else f" E{e:.3f}"))
+    return "\n".join(lines) + "\n"
+
+
 if __name__ == "__main__":
+    (HERE / "spiral.gcode").write_text(spiral_gcode())
     save_stl_ascii(HERE / "cube.stl", cube())
     save_stl_ascii(HERE / "pyramid.stl", pyramid())
     save_stl_ascii(HERE / "torus.stl", torus())
-    print("wrote cube.stl, pyramid.stl, torus.stl")
+    print("wrote cube.stl, pyramid.stl, torus.stl, spiral.gcode")

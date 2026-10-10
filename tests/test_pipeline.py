@@ -86,3 +86,41 @@ def test_cli_build(tmp_path):
     assert main(["build", str(stl), "--size", "3", "-o", str(tmp_path / "out")]) == 0
     plan = json.loads((tmp_path / "out" / "plan.json").read_text())
     assert plan["beams"]
+
+
+def test_lattice_walk_is_26_connected():
+    from satisfactory_printer.beams import lattice_walk
+
+    pts = lattice_walk(np.array([0.5, 0.5, 0.5]), np.array([17.3, -6.5, 9.5]))
+    for p, q in zip(pts, pts[1:]):
+        assert max(abs(a - b) for a, b in zip(p, q)) == 1
+
+
+def test_lattice_beams_only_use_cube_directions():
+    from satisfactory_printer.beams import beams_from_segments_lattice
+
+    segs = [
+        (np.array([0, 0, 0]), np.array([20, 0, 0])),  # straight, longer than max_len
+        (np.array([0, 0, 0]), np.array([5, 5, 5])),  # space diagonal
+        (np.array([0, 0, 0]), np.array([10, 0, 0])),  # overlaps the first one
+        (np.array([0, 0, 0]), np.array([7, 3, 1])),  # arbitrary -> staircase of allowed steps
+    ]
+    beams = beams_from_segments_lattice(segs, max_len=12)
+    for b in beams:
+        v = np.array(b.vector)
+        steps = np.abs(v).max()
+        assert set(np.unique(np.abs(v))) <= {0, steps}  # direction components are 0 or ±1 * steps
+        assert b.length <= 12 + 1e-9
+    assert Beam((0, 0, 0), (5, 5, 5)) in beams
+    straight = [b for b in beams if b.vector[1] == 0 and b.vector[2] == 0 and b.start[1:] == (0, 0)]
+    assert sum(abs(b.vector[0]) for b in straight) >= 20  # x axis covered once, no duplicates beyond overlap
+
+
+def test_cli_gcode_lattice(tmp_path):
+    g = tmp_path / "t.gcode"
+    g.write_text("G90\nM82\nG92 E0\nG0 X0 Y0 Z0\nG1 X10 Y10 Z10 E1\nG1 X20 Y10 Z10 E2\n")
+    assert main(["build", str(g), "--scale", "1", "-o", str(tmp_path / "o")]) == 0
+    plan = json.loads((tmp_path / "o" / "plan.json").read_text())
+    vecs = sorted(tuple(np.subtract(b["end"], b["start"])) for b in plan["beams"])
+    # 10 space-diagonal steps (1.73 m each) split at max 12 m -> 6 + 4 steps
+    assert vecs == [(4, 4, 4), (6, 6, 6), (10, 0, 0)]
