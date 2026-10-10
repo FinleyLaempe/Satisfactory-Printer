@@ -50,10 +50,19 @@ Copy the `.sbp`/`.sbpcfg` files to
 `%LOCALAPPDATA%\FactoryGame\Saved\SaveGames\blueprints\<your session name>\` and restart
 or reload the game. `PLACEMENT.txt` lists the tiles.
 
-**The size limit.** The blueprint designer is at most 6×6×6 foundations (Mk3 = 48 m;
-`--designer 4|5` for Mk1/Mk2). Larger models are cut into tiles (beams are split at the
-borders). Place tile `0_0_0`, then each other tile *i* tiles right, *j* forward and *k* up,
-snapped to the foundation grid. Placing a blueprint needs all its material at once.
+**Blueprint size.** The in-game designers stop at 6×6×6 foundations (Mk3 = 48 m). The size is
+just a number in the blueprint file, though, and the game accepts bigger ones. Designer
+mods go up to 12×12×12 (96 m), and blueprints made with them work without the mod.
+`--designer` options:
+
+- `auto` (default): one blueprint sized to the whole model, e.g. 11×11×16 foundations;
+- `12x12x12` or any `AxBxC`: tiles of that size. Use ≤ 12 per axis if a very large
+  blueprint causes trouble;
+- `6` / `5` / `4`: Mk3 / Mk2 / Mk1 sized tiles, for building them in a vanilla designer.
+
+With tiles, place `0_0_0` first, then each other tile *i* tiles right, *j* forward and *k*
+up, snapped to the foundation grid (`PLACEMENT.txt` gives the distances). Placing a
+blueprint needs all its material at once, and very large ones may lag when placed.
 
 **Not yet tested in the game.** The file format comes from
 [satisfactory-file-parser](https://github.com/etothepii4/satisfactory-file-parser) (MIT, game

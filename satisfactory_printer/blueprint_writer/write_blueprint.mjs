@@ -7,7 +7,7 @@
 //                                     // If it contains a beam, that beam object is cloned (safest).
 //   out: {sbp, sbpcfg},
 //   name, description,
-//   designer: 4 | 5 | 6,              // designer size in foundations (Mk1/Mk2/Mk3)
+//   designer: [x, y, z],              // designer size in foundations (Mk3 = 6,6,6; bigger works too)
 //   beam_type_path, beam_recipe,      // optional overrides
 //   swatch,                           // optional swatch path
 //   finish,                           // optional paint finish path (e.g. Caterium); stored like
@@ -86,7 +86,8 @@ const totalM = spec.beams.reduce((s, b) => s + b[7] / 100, 0);
 const bp = clone(tpl);
 bp.name = spec.name;
 bp.objects = objects;
-bp.header.designerDimension = { x: spec.designer, y: spec.designer, z: spec.designer };
+const d = Array.isArray(spec.designer) ? spec.designer : [spec.designer, spec.designer, spec.designer];
+bp.header.designerDimension = { x: d[0], y: d[1], z: d[2] };
 bp.header.recipeReferences = [{ levelName: '', pathName: RECIPE }];
 bp.header.itemCosts = (spec.cost_per_m || []).map(([item, perM]) => [{ levelName: '', pathName: item }, Math.max(1, Math.ceil(perM * totalM))]);
 bp.config.description = spec.description || '';

@@ -369,7 +369,7 @@ def test_tiles_split_beams_at_designer_borders():
 
     beams = [Beam((0.0, 0.0, 1.0), (100.0, 0.0, 1.0)), Beam((1.0, 1.0, 0.0), (1.0, 1.0, 10.0))]
     normals = np.array([[0, 0, 1.0], [1.0, 0, 0]])
-    tiles = make_tiles(beams, normals, designer=6, inset=0)
+    tiles = make_tiles(beams, normals, designer=(6, 6, 6), inset=0)
     size = 48
     total = 0.0
     for t in tiles:
@@ -401,3 +401,15 @@ def test_blueprint_files_roundtrip(tmp_path):
     assert sbp and all(p.with_suffix(".sbpcfg").exists() for p in sbp)
     assert (out / "PLACEMENT.txt").exists() and (out / "preview.html").exists()
     shutil.rmtree(out)
+
+
+def test_designer_sizes():
+    from satisfactory_printer.blueprint import auto_designer, make_tiles, parse_designer
+
+    assert parse_designer("6") == (6, 6, 6) and parse_designer("11x11x15") == (11, 11, 15)
+    assert parse_designer("auto") == "auto"
+    beams = [Beam((0.0, 0.0, 0.0), (81.0, 0.0, 0.0)), Beam((0.0, 0.0, 0.0), (0.0, 0.0, 120.0))]
+    normals = np.array([[0, 0, 1.0], [1.0, 0, 0]])
+    d = auto_designer(beams, normals, inset=0)
+    assert d == (11, 1, 16)  # 82 m, 1 m, 121 m incl. beam thickness -> whole foundations
+    assert len(make_tiles(beams, normals, d, inset=0)) == 1

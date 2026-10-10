@@ -3,8 +3,11 @@
 A blueprint stores every beam's exact position (cm), rotation (quaternion) and length, so
 nothing is snapped to the 1 m nudge grid and every beam is turned with a face flat on the
 surface. Limits:
-* the blueprint designer is small (Mk1 4x4x4, Mk2 5x5x5, Mk3 6x6x6 foundations = 32/40/48 m),
-  so large models are cut into tiles that you place next to / on top of each other;
+* the in-game designers are small (Mk1 4x4x4, Mk2 5x5x5, Mk3 6x6x6 foundations = 32/40/48 m).
+  The size is just a number in the file, though, and the game also accepts bigger blueprints
+  (designer mods go up to 12x12x12, and blueprints made with them work without the mod).
+  `designer="auto"` sizes one blueprint to the whole model; otherwise large models are cut
+  into tiles that you place next to / on top of each other;
 * placing a blueprint needs all of its material at once.
 
 Coordinates: our model space is x right, y forward, z up, metres. Unreal is left-handed with
@@ -95,14 +98,36 @@ def _clip(s: np.ndarray, e: np.ndarray, lo: np.ndarray, hi: np.ndarray) -> tuple
     return t0, t1
 
 
-def make_tiles(beams: list[Beam], normals: np.ndarray, designer: int, inset: float = 0.5,
+def parse_designer(text: str | int) -> tuple[int, int, int] | str:
+    """'6' -> (6, 6, 6); '11x11x15' -> (11, 11, 15); 'auto' -> 'auto' (foundations, 8 m each)."""
+    t = str(text).lower().strip()
+    if t == "auto":
+        return "auto"
+    parts = [int(v) for v in t.replace("×", "x").split("x")]
+    if len(parts) == 1:
+        parts *= 3
+    if len(parts) != 3 or min(parts) < 1:
+        raise ValueError(f"designer size must be N or AxBxC foundations, got {text!r}")
+    return (parts[0], parts[1], parts[2])
+
+
+def auto_designer(beams: list[Beam], normals: np.ndarray, inset: float = 0.5) -> tuple[int, int, int]:
+    """Smallest designer (in foundations) that holds the whole model in one blueprint."""
+    pts = np.array([np.array(p, float) - inset * n for b, n in zip(beams, normals) for p in (b.start, b.end)])
+    ext = pts.max(axis=0) - pts.min(axis=0) + 1.0  # + beam thickness
+    return tuple(int(max(np.ceil(e / FOUNDATION_M), 1)) for e in ext)  # type: ignore[return-value]
+
+
+def make_tiles(beams: list[Beam], normals: np.ndarray, designer, inset: float = 0.5,
                min_piece: float = 0.25) -> list[Tile]:
     """Cut the beams into designer-sized tiles (beams crossing a border are split there).
 
     inset: move every beam this far into the surface, so its outer face (not its centre line)
     lies on the model surface.
     """
-    size = designer * FOUNDATION_M
+    if isinstance(designer, int):
+        designer = (designer, designer, designer)
+    size = np.array(designer, dtype=float) * FOUNDATION_M  # per axis
     segs = []
     for b, n in zip(beams, normals):
         s = np.array(b.start, float) - inset * n
@@ -130,7 +155,7 @@ def make_tiles(beams: list[Beam], normals: np.ndarray, designer: int, inset: flo
                         continue
                     key = (i, j, k)
                     if key not in tiles:
-                        origin = box_lo + np.array([size / 2, size / 2, 0.0])
+                        origin = box_lo + np.array([size[0] / 2, size[1] / 2, 0.0])
                         tiles[key] = Tile(key, origin, [])
                     tiles[key].beams.append((ps, pe, n))
     return [tiles[k] for k in sorted(tiles)]
@@ -145,7 +170,7 @@ def check_node() -> str | None:
     return None
 
 
-def write_tiles(tiles: list[Tile], out: Path, name: str, designer: int, template: Path | None = None,
+def write_tiles(tiles: list[Tile], out: Path, name: str, designer, template: Path | None = None,
                 cost_per_m: float = 0.25, max_len: float = 40.0, finish: str | None = None) -> list[dict]:
     """Write one blueprint per tile. Returns a list of {file, tile, beams, origin_m}."""
     problem = check_node()
@@ -175,7 +200,7 @@ def write_tiles(tiles: list[Tile], out: Path, name: str, designer: int, template
             "out": {"sbp": str(out / f"{bp_name}.sbp"), "sbpcfg": str(out / f"{bp_name}.sbpcfg")},
             "name": bp_name,
             "description": f"Satisfactory Printer: {name} tile {t.index}" if multi else f"Satisfactory Printer: {name}",
-            "designer": designer,
+            "designer": list(designer) if not isinstance(designer, int) else [designer] * 3,
             "cost_per_m": [[IRON_PLATE, cost_per_m]] if cost_per_m > 0 else [],
             "finish": {k.lower(): v for k, v in FINISHES.items()}[finish.lower()] if finish else None,
             "beams": rows,
@@ -192,17 +217,25 @@ def write_tiles(tiles: list[Tile], out: Path, name: str, designer: int, template
     return results
 
 
-def placement_guide(results: list[dict], designer: int) -> str:
-    size = designer * FOUNDATION_M
-    lines = [
-        f"Blueprint tiles ({len(results)}), designer {designer}x{designer}x{designer} = {size:g} m:",
-        "Place tile 0_0_0 first. Every other tile goes exactly next to / above it:",
-        "tile (i, j, k) = i tiles to the right (x), j tiles forward (y), k tiles up (z),",
-        f"i.e. {size:g} m = {int(size // FOUNDATION_M)} foundations per tile step.",
+def placement_guide(results: list[dict], designer) -> str:
+    if isinstance(designer, int):
+        designer = (designer, designer, designer)
+    sx, sy, sz = (d * FOUNDATION_M for d in designer)
+    lines = [f"Blueprint designer size: {designer[0]}x{designer[1]}x{designer[2]} foundations "
+             f"= {sx:g} x {sy:g} x {sz:g} m"]
+    if max(designer) > 6:
+        lines.append("(bigger than the in-game Mk.3 designer - the game accepts it, as with designer mods)")
+    if len(results) == 1:
+        lines.append(f"One blueprint: {results[0]['file']} ({results[0]['beams']} beams). Place it and done.")
+        return "\n".join(lines) + "\n"
+    lines += [
+        f"{len(results)} tiles. Place tile 0_0_0 first. Every other tile goes exactly next to / above it:",
+        f"tile (i, j, k) = i x {sx:g} m to the right, j x {sy:g} m forward, k x {sz:g} m up",
+        "(whole foundations, so they snap to the same grid).",
         "",
     ]
     for r in results:
         i, j, k = r["tile"]
-        lines.append(f"  {r['file']:40s} right {i * size:6g} m, forward {j * size:6g} m, up {k * size:6g} m"
+        lines.append(f"  {r['file']:40s} right {i * sx:6g} m, forward {j * sy:6g} m, up {k * sz:6g} m"
                      f"   ({r['beams']} beams)")
     return "\n".join(lines) + "\n"

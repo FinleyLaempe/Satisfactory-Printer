@@ -256,12 +256,15 @@ def _cmd_blueprint(args: argparse.Namespace) -> int:
         print("Model produced no beams.", file=sys.stderr)
         return 1
     normals = bpmod.face_normals(beams, mesh)
-    tiles = bpmod.make_tiles(beams, normals, args.designer, inset=args.inset)
+    designer = bpmod.parse_designer(args.designer)
+    if designer == "auto":
+        designer = bpmod.auto_designer(beams, normals, inset=args.inset)
+    tiles = bpmod.make_tiles(beams, normals, designer, inset=args.inset)
     out = Path(args.output)
     name = args.name or src.stem
-    results = bpmod.write_tiles(tiles, out, name, args.designer, args.bp_template, args.cost_per_m, max_len,
+    results = bpmod.write_tiles(tiles, out, name, designer, args.bp_template, args.cost_per_m, max_len,
                                 finish=args.finish)
-    guide = bpmod.placement_guide(results, args.designer)
+    guide = bpmod.placement_guide(results, designer)
     (out / "PLACEMENT.txt").write_text(guide)
 
     # preview of exactly what the blueprints contain (inset applied, exact rotation)
@@ -278,7 +281,7 @@ def _cmd_blueprint(args: argparse.Namespace) -> int:
         "model size": " × ".join(f"{v:.0f}" for v in (mesh.reshape(-1, 3).max(0) - mesh.reshape(-1, 3).min(0))) + " m",
         "beams": str(len(shown)),
         "total beam length": f"{sum(b.length for b in shown):.0f} m",
-        "blueprint tiles": f"{len(results)} × designer {args.designer}×{args.designer}×{args.designer}",
+        "blueprint tiles": f"{len(results)} × designer {designer[0]}×{designer[1]}×{designer[2]} foundations",
         "surface coverage": f"{m['coverage_pct']}%",
         "mean deviation": f"{m['mean_dev_m']} m (95%: {m['p95_dev_m']} m)",
     }
@@ -380,8 +383,9 @@ def _build_parser() -> argparse.ArgumentParser:
     bp = sub.add_parser("blueprint", help="write the model as Satisfactory blueprint files (exact, one click)")
     _add_model_args(bp)
     _add_build_options(bp)
-    bp.add_argument("--designer", type=int, choices=[4, 5, 6], default=6,
-                    help="blueprint designer size in foundations: 4 = Mk1 (32 m), 5 = Mk2 (40 m), 6 = Mk3 (48 m)")
+    bp.add_argument("--designer", default="auto",
+                    help="blueprint size in foundations (8 m): auto (default) = one blueprint for the whole "
+                         "model; 6 = Mk3 tiles (48 m), 5 = Mk2, 4 = Mk1; or AxBxC, e.g. 12x12x12")
     bp.add_argument("--inset", type=float, default=0.5,
                     help="move beams this far into the surface so their outer face is on it (m)")
     bp.add_argument("--bp-template", type=Path,
