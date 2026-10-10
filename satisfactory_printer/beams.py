@@ -70,7 +70,7 @@ def _axis_beam(axis: int, a: int, b: int, pos: int, length: int) -> Beam:
     return Beam(tuple(start), tuple(end))  # type: ignore[arg-type]
 
 
-def beams_from_voxels(grid: np.ndarray, max_len: int = 12, axis: str = "auto") -> list[Beam]:
+def beams_from_voxels(grid: np.ndarray, max_len: int = 40, axis: str = "auto") -> list[Beam]:
     """Merge filled voxels into straight 1x1xL beams.
 
     axis: "x", "y", "z" or "auto" (picks the direction that needs the fewest beams).
@@ -99,7 +99,7 @@ def split_segment(start: np.ndarray, end: np.ndarray, max_len: float) -> list[Be
         pieces += 1
 
 
-def beams_from_segments(segments: list[tuple[np.ndarray, np.ndarray]], max_len: float = 12) -> list[Beam]:
+def beams_from_segments(segments: list[tuple[np.ndarray, np.ndarray]], max_len: float = 40) -> list[Beam]:
     seen: set[Beam] = set()
     out: list[Beam] = []
     for s, e in segments:
@@ -112,7 +112,7 @@ def beams_from_segments(segments: list[tuple[np.ndarray, np.ndarray]], max_len: 
 
 
 def beams_from_mesh_edges(
-    tris: np.ndarray, max_len: float = 12, feature_angle: float = 1.0, lattice: bool = False
+    tris: np.ndarray, max_len: float = 40, feature_angle: float = 1.0, lattice: bool = False
 ) -> list[Beam]:
     """Wireframe mode: one beam per mesh edge.
 
@@ -185,7 +185,7 @@ def lattice_walk(start: np.ndarray, end: np.ndarray) -> list[Vec]:
 
 
 def beams_from_segments_lattice(
-    segments: list[tuple[np.ndarray, np.ndarray]], max_len: float = 12
+    segments: list[tuple[np.ndarray, np.ndarray]], max_len: float = 40
 ) -> list[Beam]:
     """Restrict segments to the 1 m lattice and merge them into maximal straight beams.
 

@@ -92,7 +92,7 @@ simplify the model first (e.g. Blender's Decimate modifier) so edges are a few m
    - **Macro.** If your game needs a different key order, edit `beam_macro`. Tokens:
      `key:lock`, `nudge:shape`, `nudge:place`, `click`, `wait:0.5`.
    - **Timing.** If key presses get lost, raise `key_delay`, `key_interval` and `click_delay`.
-   - **Limits.** `max_beam_length` splits long beams. `max_nudge` warns when an offset needs
+   - **Limits.** `max_beam_length` (default 40 m, the in-game maximum) splits longer beams. `max_nudge` warns when an offset needs
      more presses than the game allows.
 4. **Keep the line of sight clear.** If a built beam ends up between your camera and the
    anchor, the crosshair hits that beam and the anchor moves. By default the model starts 2 m

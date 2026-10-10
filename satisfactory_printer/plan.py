@@ -62,7 +62,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "key_interval": 0.05,  # pause between key presses
     "click_delay": 0.25,  # pause after a click (game needs time to register)
     "beam_delay": 0.3,  # pause after each beam
-    "max_beam_length": 12,
+    "max_beam_length": 40,  # longest beam the game allows (m)
     "max_nudge": 0,  # 0 = no limit; otherwise warn when one axis needs more nudges
 }
 
