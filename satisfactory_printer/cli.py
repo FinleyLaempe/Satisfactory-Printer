@@ -392,7 +392,7 @@ def _build_parser() -> argparse.ArgumentParser:
                     help="your own small blueprint (.sbp, with .sbpcfg next to it) containing one painted "
                          "beam: its game version and exact beam object are used")
     bp.add_argument("--cost-per-m", type=float, default=0.25,
-                    help="iron plates per metre of beam written into the blueprint cost list")
+                    help="steel beams per metre of painted beam, for the blueprint's cost list")
     bp.add_argument("--name", help="blueprint name (default: model file name)")
     bp.add_argument("--finish", type=str.lower, choices=["caterium", "copper", "chrome", "carbonsteel"],
                     help="metal paint finish for all beams, e.g. caterium (gold)")

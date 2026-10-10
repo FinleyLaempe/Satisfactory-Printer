@@ -33,7 +33,9 @@ from .orient import face_normals
 WRITER_DIR = Path(__file__).parent / "blueprint_writer"
 DEFAULT_TEMPLATE = WRITER_DIR / "template" / "template.sbp"
 FOUNDATION_M = 8.0
-IRON_PLATE = "/Game/FactoryGame/Resource/Parts/IronPlate/Desc_IronPlate.Desc_IronPlate_C"
+# painted beams are paid for with Steel Beams (internally "SteelPlate": a real blueprint with
+# an Industrial Storage Container lists Desc_SteelPlate x20 + Desc_SteelPipe x20)
+STEEL_BEAM = "/Game/FactoryGame/Resource/Parts/SteelPlate/Desc_SteelPlate.Desc_SteelPlate_C"
 _FINISH_DIR = "/Game/FactoryGame/Buildable/-Shared/Customization/PaintFinishes/Metals"
 FINISHES = {  # metal paint finishes (unlocked via the AWESOME Shop)
     name: f"{_FINISH_DIR}/PaintFinishDesc_{name}.PaintFinishDesc_{name}_C"
@@ -201,7 +203,7 @@ def write_tiles(tiles: list[Tile], out: Path, name: str, designer, template: Pat
             "name": bp_name,
             "description": f"Satisfactory Printer: {name} tile {t.index}" if multi else f"Satisfactory Printer: {name}",
             "designer": list(designer) if not isinstance(designer, int) else [designer] * 3,
-            "cost_per_m": [[IRON_PLATE, cost_per_m]] if cost_per_m > 0 else [],
+            "cost_per_m": [[STEEL_BEAM, cost_per_m]] if cost_per_m > 0 else [],
             "finish": {k.lower(): v for k, v in FINISHES.items()}[finish.lower()] if finish else None,
             "beams": rows,
         }

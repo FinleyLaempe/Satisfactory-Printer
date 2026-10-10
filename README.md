@@ -71,7 +71,7 @@ in `mLength`) is taken from real save files. The bundled template is a 1.2 bluep
 without beams. For the safest result, make a small blueprint with one painted beam in your
 game and pass it with `--bp-template your.sbp`. Its exact beam object and game version are
 then used. Try a small model (e.g. `examples/rocket.stl --size 30`) before a big one.
-The cost list in the file is an estimate (`--cost-per-m`, iron plates per metre).
+The cost list in the file is an estimate (`--cost-per-m`, steel beams per metre).
 
 `--finish caterium` (or `copper`, `chrome`, `carbonsteel`) gives every beam that metal paint
 finish. It's stored the way the game stores it on buildings. The finish must be unlocked
