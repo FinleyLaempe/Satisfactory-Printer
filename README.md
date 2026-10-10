@@ -128,6 +128,7 @@ Patch beams show in orange in the preview (colour by method). Turn the filler of
 | `--no-roll`         | off     | don't roll beams flat onto the surface (saves 1–3 wheel notches per beam) |
 | `--no-fill`         | off     | skip the gap filler |
 | `--kps`             | 10      | typing speed in keystrokes per second |
+| `-j`, `--workers`   | all cores | CPU cores used for the calculations (`-j 1` = single core). Typing into the game is always one key at a time |
 | `--no-merge`        | off     | keep collinear overlapping beams separate |
 
 The summary after each build shows these numbers:

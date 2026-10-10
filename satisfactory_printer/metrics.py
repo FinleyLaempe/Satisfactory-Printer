@@ -13,6 +13,7 @@ from collections import defaultdict
 
 import numpy as np
 
+from . import parallel
 from .beams import Beam
 
 CAP = 3.0  # distances are capped (search radius) - anything further counts as CAP
@@ -48,8 +49,28 @@ def nearest_distance(query: np.ndarray, targets: np.ndarray, cell: float = CAP) 
     """Distance from every query point to the closest target point (capped at `cell`).
 
     Spatial hash with buckets of size `cell`: only the 27 neighbouring buckets are searched,
-    so a small cell (e.g. when only "closer than 0.6 m?" matters) is much faster.
+    so a small cell (e.g. when only "closer than 0.6 m?" matters) is much faster. Large
+    inputs are cut into slabs along the longest axis and run on all CPU cores.
     """
+    if parallel.workers() <= 1 or len(query) < 40_000 or len(targets) == 0:
+        return _nearest_serial(query, targets, cell)
+    axis = int(np.argmax(query.max(axis=0) - query.min(axis=0)))
+    order = np.argsort(query[:, axis], kind="stable")
+    jobs, slots = [], []
+    for sl in parallel.chunks(len(order), min_size=10_000):
+        idx = order[sl]
+        q = query[idx]
+        lo, hi = q[:, axis].min() - cell, q[:, axis].max() + cell
+        t = targets[(targets[:, axis] >= lo) & (targets[:, axis] <= hi)]
+        jobs.append((q, t, cell))
+        slots.append(idx)
+    out = np.empty(len(query))
+    for idx, d in zip(slots, parallel.pmap(_nearest_serial, jobs)):
+        out[idx] = d
+    return out
+
+
+def _nearest_serial(query: np.ndarray, targets: np.ndarray, cell: float = CAP) -> np.ndarray:
     out = np.full(len(query), cell)
     if len(targets) == 0 or len(query) == 0:
         return out

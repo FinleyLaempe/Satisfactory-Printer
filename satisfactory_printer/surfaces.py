@@ -18,6 +18,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from . import parallel
 from .beams import Beam, beams_from_segments_lattice, polyline_to_beams, split_segment
 
 
@@ -473,16 +474,22 @@ def local_flow_directions(tris: np.ndarray, radius: float | None = None) -> np.n
     # sample each face with its centroid and vertices, weighted by area
     samp = np.concatenate([cent, tris[:, 0], tris[:, 1], tris[:, 2]])
     w = np.concatenate([area, area / 3, area / 3, area / 3])
+    jobs = [(samp, w, cent, radius, sl.start, sl.stop) for sl in parallel.chunks(len(tris), min_size=500)]
+    return np.concatenate(parallel.pmap(_flow_range, jobs))
+
+
+def _flow_range(samp, w, cent, radius, start, stop):
+    """local_flow_directions for faces [start, stop) (runs in a worker process)."""
     cells: dict[tuple, list[int]] = {}
     keys = np.floor(samp / radius).astype(int)
     for i, k in enumerate(map(tuple, keys)):
         cells.setdefault(k, []).append(i)
     cells_np = {k: np.array(v) for k, v in cells.items()}
     offs = [(dx, dy, dz) for dx in (-1, 0, 1) for dy in (-1, 0, 1) for dz in (-1, 0, 1)]
-    out = np.tile(np.array([0.0, 0.0, 1.0]), (len(tris), 1))
+    out = np.tile(np.array([0.0, 0.0, 1.0]), (stop - start, 1))
     ckeys = np.floor(cent / radius).astype(int)
     r2 = radius * radius
-    for f in range(len(tris)):
+    for f in range(start, stop):
         k = ckeys[f]
         idx = [cells_np[c] for o in offs if (c := (k[0] + o[0], k[1] + o[1], k[2] + o[2])) in cells_np]
         idx = np.concatenate(idx)
@@ -497,7 +504,7 @@ def local_flow_directions(tris: np.ndarray, radius: float | None = None) -> np.n
         cov = (c * ww[:, None]).T @ c / ww.sum()
         vals, vecs = np.linalg.eigh(cov)
         if vals[2] > 1.6 * max(vals[1], 1e-9):
-            out[f] = vecs[:, 2]
+            out[f - start] = vecs[:, 2]
     return out
 
 
@@ -571,24 +578,21 @@ def beams_from_contours(
         step = max(int(round(ring_spacing)), 1)
         groups = [(tuple(int(a == c) for c in "xyz"), step, np.ones(len(tris), dtype=bool)) for a in axes]
 
+    jobs = []
     for u, step, mask in groups:
         if not mask.any():
             continue
         sub = tris[mask]
         u_arr = np.array(u, dtype=float)
-        norm = float(np.linalg.norm(u_arr))
-        normal = u_arr / norm
         kind = "ring" if u == (0, 0, 1) else ("stave" if pattern == "flow" else "arc")
         lv = tris @ u_arr  # level of every vertex (integer points have integer levels)
         s_lv = sub @ u_arr
-        lo_l, hi_l = float(lv.min()), float(lv.max())
-        for level in range(int(math.floor(s_lv.min())), int(math.ceil(s_lv.max())) + 1, step):
-            # nudge the cutting plane inside so faces lying exactly on a level still get cut
-            h = min(max(level, lo_l + 0.05), hi_l - 0.05)
-            polys = slice_plane(sub, normal, h / norm)
-            for p in polys:
-                p += np.outer(level - p @ u_arr, u_arr) / (norm * norm)  # exactly onto the level
-            beams += _polylines_to_beams(polys, tol, max_len, kind)
+        levels = list(range(int(math.floor(s_lv.min())), int(math.ceil(s_lv.max())) + 1, step))
+        # independent slices: spread them over the CPU cores in batches
+        for k in range(0, len(levels), 16):
+            jobs.append((sub, u, levels[k:k + 16], float(lv.min()), float(lv.max()), tol, max_len, kind))
+    for part in parallel.pmap(_slice_levels, jobs):
+        beams += part
 
     if rib_spacing > 0:
         centre = (lo + hi) / 2
@@ -607,6 +611,22 @@ def beams_from_contours(
                     if len(run) >= 2:
                         half.append(p[run])
             beams += _polylines_to_beams(half, tol, max_len, "rib")
+    return beams
+
+
+def _slice_levels(sub, u, levels, lo_l, hi_l, tol, max_len, kind) -> list[Beam]:
+    """Cut `sub` with the planes u . x = level for each level and straighten into beams."""
+    u_arr = np.array(u, dtype=float)
+    norm = float(np.linalg.norm(u_arr))
+    normal = u_arr / norm
+    beams: list[Beam] = []
+    for level in levels:
+        # nudge the cutting plane inside so faces lying exactly on a level still get cut
+        h = min(max(level, lo_l + 0.05), hi_l - 0.05)
+        polys = slice_plane(sub, normal, h / norm)
+        for p in polys:
+            p += np.outer(level - p @ u_arr, u_arr) / (norm * norm)  # exactly onto the level
+        beams += _polylines_to_beams(polys, tol, max_len, kind)
     return beams
 
 

@@ -243,6 +243,8 @@ def _cmd_run(args: argparse.Namespace) -> int:
 
 def _add_model_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("input", help=".stl or .obj model (Z up)")
+    p.add_argument("-j", "--workers", type=int,
+                   help="CPU cores to use for the calculations (default: all; 1 = no parallelism)")
     p.add_argument("-o", "--output", default="out")
     size = p.add_mutually_exclusive_group()
     size.add_argument("--size", type=float, help="largest model dimension in metres (default 20)")
@@ -328,6 +330,10 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
+    if getattr(args, "workers", None) is not None or args.cmd != "run":
+        from . import parallel
+
+        parallel.set_workers(getattr(args, "workers", None))
     if args.cmd in ("build", "compare", "serve") and args.size is None and args.scale is None:
         args.size = 20.0
     return args.func(args)

@@ -314,3 +314,17 @@ def test_planned_wheel_notches_turn_a_face_onto_the_surface():
         face = rotate(reference_face(axis), axis, 15 * notches)
         c = abs(face @ normal)
         assert c > 0.99 or c < 0.01  # one face (or its neighbour at 90°) lies on the roof
+
+
+def test_parallel_matches_serial():
+    from satisfactory_printer import metrics, parallel
+
+    rng = np.random.default_rng(3)
+    q, t = rng.random((60_000, 3)) * 50, rng.random((50_000, 3)) * 50
+    parallel.set_workers(1)
+    serial = metrics.nearest_distance(q, t, 0.61)
+    parallel.set_workers(4)
+    try:
+        assert np.array_equal(serial, metrics.nearest_distance(q, t, 0.61))
+    finally:
+        parallel.set_workers(None)

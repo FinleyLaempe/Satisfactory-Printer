@@ -18,6 +18,7 @@ import math
 
 import numpy as np
 
+from . import parallel
 from .beams import Beam
 
 
@@ -37,6 +38,13 @@ def roll_steps(beams: list[Beam], tris: np.ndarray, step_deg: float = 15.0) -> l
     if not len(tris) or not beams:
         return [0] * len(beams)
     tris = np.asarray(tris, dtype=float)
+    ends = np.array([[b.start, b.end] for b in beams], dtype=float)
+    jobs = [(tris, ends[sl], step_deg) for sl in parallel.chunks(len(beams), min_size=500)]
+    return [r for part in parallel.pmap(_roll_range, jobs) for r in part]
+
+
+def _roll_range(tris: np.ndarray, ends: np.ndarray, step_deg: float) -> list[int]:
+    """roll_steps for beams given as (N, 2, 3) start/end arrays (runs in a worker process)."""
     cent = tris.mean(axis=1)
     nrm = np.cross(tris[:, 1] - tris[:, 0], tris[:, 2] - tris[:, 0])
     nrm /= np.maximum(np.linalg.norm(nrm, axis=1, keepdims=True), 1e-12)
@@ -56,8 +64,7 @@ def roll_steps(beams: list[Beam], tris: np.ndarray, step_deg: float = 15.0) -> l
 
     max_steps = int(round(45 / step_deg))
     out = []
-    for b in beams:
-        s, e = np.array(b.start, float), np.array(b.end, float)
+    for s, e in ends:
         axis = (e - s) / max(np.linalg.norm(e - s), 1e-9)
         # average surface normal along the beam (sign-aligned)
         acc = np.zeros(3)
