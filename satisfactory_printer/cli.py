@@ -19,13 +19,22 @@ import numpy as np
 
 from . import beams as beam_mod
 from . import surfaces
-from .mesh import load_mesh
+from .mesh import drop_base, load_mesh
 from .plan import apply_speed, build_plan, keystrokes_per_second, load_config, plan_to_json, plan_to_text
 from .preview import ascii_layers, export_obj
 from .preview_html import export_html, make_preview_data
 from .voxelize import hollow, scale_to_grid, voxelize_solid, voxelize_surface
 
 MODES = ["hybrid", "planes", "contour", "voxel", "wireframe"]
+
+
+def load_model(path, args) -> np.ndarray:
+    """Load a model and apply model-level options (e.g. --drop-base)."""
+    tris = load_mesh(path)
+    frac = getattr(args, "drop_base", None)
+    if frac:
+        tris = drop_base(tris, frac)
+    return tris
 
 
 def generate(tris, args, max_len: float):
@@ -189,7 +198,7 @@ def preview_data(res: BuildResult, stats: dict[str, str]) -> dict:
 
 def _cmd_build(args: argparse.Namespace) -> int:
     src = Path(args.input)
-    res = run_build(load_mesh(src), args, src.name)
+    res = run_build(load_model(src, args), args, src.name)
     if not res.beams:
         print("Model produced no beams (too small? try a bigger --size).", file=sys.stderr)
         return 1
@@ -245,7 +254,7 @@ def _cmd_blueprint(args: argparse.Namespace) -> int:
     max_len = float(args.max_beam_length or cfg["max_beam_length"])
     set_precise(True)
     try:
-        tris = scale_to_grid(load_mesh(src), size=args.size, scale=args.scale)
+        tris = scale_to_grid(load_model(src, args), size=args.size, scale=args.scale)
         beams, mesh, _ = generate(tris, args, max_len)
         if not args.no_fill:
             beams = fill_gaps(beams, mesh, max_len)
@@ -323,6 +332,9 @@ def _add_model_args(p: argparse.ArgumentParser) -> None:
     size.add_argument("--size", type=float, help="largest model dimension in metres (default 20)")
     size.add_argument("--scale", type=float, help="metres per model unit")
     p.add_argument("-c", "--config", help="JSON config overriding the defaults (see config.example.json)")
+    p.add_argument("--drop-base", type=float, metavar="FRACTION",
+                   help="remove separate parts lying completely in the bottom FRACTION of the model height, "
+                        "e.g. 0.16 to take a statue off its pedestal")
 
 
 def _add_build_options(b: argparse.ArgumentParser) -> None:

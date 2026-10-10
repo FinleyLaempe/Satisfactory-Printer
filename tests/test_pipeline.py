@@ -413,3 +413,12 @@ def test_designer_sizes():
     d = auto_designer(beams, normals, inset=0)
     assert d == (11, 1, 16)  # 82 m, 1 m, 121 m incl. beam thickness -> whole foundations
     assert len(make_tiles(beams, normals, d, inset=0)) == 1
+
+
+def test_drop_base_removes_only_the_pedestal():
+    from satisfactory_printer.mesh import drop_base
+
+    pedestal = cube(1.0) * np.array([20, 20, 2])  # wide flat block at the bottom
+    column = cube(1.0) * np.array([2, 2, 30]) + np.array([9, 9, 2])  # separate part on top of it
+    kept = drop_base(np.vstack([pedestal, column]), 0.16)
+    assert len(kept) == len(column) and kept[..., 2].min() >= 2

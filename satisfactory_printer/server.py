@@ -35,7 +35,7 @@ class LiveSession:
         self.cli = cli
         self.base = args
         self.src = Path(args.input)
-        self.raw = load_mesh(self.src)
+        self.raw = self.cli.load_model(self.src, args)
         self.out = Path(args.output)
         self.lock = threading.Lock()
         self.cache: OrderedDict[tuple, tuple] = OrderedDict()
