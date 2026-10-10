@@ -1,9 +1,16 @@
-"""Beam generation: voxel grid / mesh edges / line segments -> list of integer beams."""
+"""Beam primitives and the generic helpers every generation mode shares.
+
+Coordinates are model coordinates in metres; beam endpoints are integers because every
+endpoint has to be reachable with whole 1 m nudges from the anchor. A beam's endpoints are
+the centres of its end faces (centreline), so a voxel at integer position p is covered by a
+beam whose centreline passes through p.
+"""
 
 from __future__ import annotations
 
+import heapq
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 
@@ -16,6 +23,7 @@ class Beam:
 
     start: Vec
     end: Vec
+    kind: str = field(default="", compare=False)  # which generator made it (for previews)
 
     @property
     def vector(self) -> Vec:
@@ -29,118 +37,16 @@ class Beam:
         return Beam(
             tuple(a + o for a, o in zip(self.start, offset)),  # type: ignore[arg-type]
             tuple(a + o for a, o in zip(self.end, offset)),  # type: ignore[arg-type]
+            self.kind,
         )
 
     def canonical(self) -> "Beam":
         """Same beam with endpoints in a fixed order (for de-duplication)."""
-        return self if self.start <= self.end else Beam(self.end, self.start)
+        return self if self.start <= self.end else Beam(self.end, self.start, self.kind)
 
 
-# --------------------------------------------------------------------------- voxels
-
-
-def _runs_along_axis(grid: np.ndarray, axis: int, max_len: int) -> list[Beam]:
-    moved = np.moveaxis(grid, axis, -1)  # [a, b, run]
-    beams: list[Beam] = []
-    for a in range(moved.shape[0]):
-        for b in range(moved.shape[1]):
-            line = moved[a, b]
-            if not line.any():
-                continue
-            # find run boundaries
-            padded = np.concatenate(([False], line, [False])).astype(np.int8)
-            diff = np.diff(padded)
-            starts = np.flatnonzero(diff == 1)
-            ends = np.flatnonzero(diff == -1)
-            for s, e in zip(starts, ends):
-                pos = int(s)
-                while pos < e:
-                    length = min(max_len, int(e) - pos)
-                    beams.append(_axis_beam(axis, a, b, pos, length))
-                    pos += length
-    return beams
-
-
-def _axis_beam(axis: int, a: int, b: int, pos: int, length: int) -> Beam:
-    other = [i for i in range(3) if i != axis]
-    start = [0, 0, 0]
-    start[other[0]], start[other[1]], start[axis] = a, b, pos
-    end = list(start)
-    end[axis] += length
-    return Beam(tuple(start), tuple(end))  # type: ignore[arg-type]
-
-
-def beams_from_voxels(grid: np.ndarray, max_len: int = 40, axis: str = "auto") -> list[Beam]:
-    """Merge filled voxels into straight 1x1xL beams.
-
-    axis: "x", "y", "z" or "auto" (picks the direction that needs the fewest beams).
-    """
-    if axis != "auto":
-        return _runs_along_axis(grid, "xyz".index(axis), max_len)
-    candidates = [_runs_along_axis(grid, i, max_len) for i in range(3)]
-    return min(candidates, key=len)
-
-
-# --------------------------------------------------------------------------- segments
-
-
-def split_segment(start: np.ndarray, end: np.ndarray, max_len: float) -> list[Beam]:
-    """Snap a segment to the integer grid and split it into pieces no longer than max_len."""
-    start = np.asarray(start, dtype=float)
-    end = np.asarray(end, dtype=float)
-    length = float(np.linalg.norm(end - start))
-    pieces = max(int(math.ceil(length / max_len)), 1) if max_len > 0 else 1
-    # Rounding can push a piece slightly over max_len; add pieces until it fits.
-    while True:
-        pts = [tuple(int(round(c)) for c in start + (end - start) * k / pieces) for k in range(pieces + 1)]
-        beams = [Beam(p, q) for p, q in zip(pts, pts[1:]) if p != q]
-        if max_len <= 0 or all(b.length <= max_len + 1e-9 for b in beams) or pieces > 1000:
-            return beams
-        pieces += 1
-
-
-def beams_from_segments(segments: list[tuple[np.ndarray, np.ndarray]], max_len: float = 40) -> list[Beam]:
-    seen: set[Beam] = set()
-    out: list[Beam] = []
-    for s, e in segments:
-        for beam in split_segment(s, e, max_len):
-            key = beam.canonical()
-            if key not in seen:
-                seen.add(key)
-                out.append(beam)
-    return out
-
-
-def beams_from_mesh_edges(
-    tris: np.ndarray, max_len: float = 40, feature_angle: float = 1.0, lattice: bool = False
-) -> list[Beam]:
-    """Wireframe mode: one beam per mesh edge.
-
-    Edges between nearly coplanar faces (dihedral angle below `feature_angle` degrees) are
-    skipped, so flat quads made of two triangles don't get a diagonal beam.
-    """
-    edge_faces: dict[tuple[tuple[float, ...], tuple[float, ...]], list[np.ndarray]] = {}
-    for tri in tris:
-        n = np.cross(tri[1] - tri[0], tri[2] - tri[0])
-        norm = np.linalg.norm(n)
-        if norm < 1e-12:
-            continue
-        n = n / norm
-        for i in range(3):
-            p = tuple(np.round(tri[i], 6))
-            q = tuple(np.round(tri[(i + 1) % 3], 6))
-            key = (p, q) if p <= q else (q, p)
-            edge_faces.setdefault(key, []).append(n)
-
-    cos_limit = math.cos(math.radians(feature_angle))
-    segments = []
-    for (p, q), normals in edge_faces.items():
-        if len(normals) == 2 and abs(float(np.dot(normals[0], normals[1]))) >= cos_limit:
-            continue
-        segments.append((np.array(p), np.array(q)))
-    if lattice:
-        return beams_from_segments_lattice(segments, max_len)
-    return beams_from_segments(segments, max_len)
+def _ivec(p) -> Vec:
+    return (int(p[0]), int(p[1]), int(p[2]))
 
 
 # --------------------------------------------------------------------------- 1 m lattice
@@ -154,76 +60,270 @@ LATTICE_DIRECTIONS: list[Vec] = [
     for dz in (-1, 0, 1)
     if (dx, dy, dz) > (0, 0, 0)
 ]
-
-
-def _canonical_step(step: Vec) -> tuple[Vec, bool]:
-    """Return (canonical direction, flipped?) for a unit lattice step."""
-    if step in _CANON:
-        return step, False
-    return tuple(-c for c in step), True  # type: ignore[return-value]
-
-
-_CANON = set(LATTICE_DIRECTIONS)
+AXIS_DIRECTIONS: list[Vec] = [(1, 0, 0), (0, 1, 0), (0, 0, 1)]
 
 
 def lattice_walk(start: np.ndarray, end: np.ndarray) -> list[Vec]:
-    """Trace a segment through the 1 m grid (3D DDA).
-
-    Consecutive points differ by at most 1 on every axis, i.e. each step is one of the 26
-    directions of a 1x1x1 cube.
-    """
+    """Trace a segment through the 1 m grid (3D DDA); each step is one of the 26 directions."""
     start = np.asarray(start, dtype=float)
     end = np.asarray(end, dtype=float)
     n = max(int(math.ceil(float(np.abs(end - start).max()))), 1)
     pts: list[Vec] = []
     for k in range(n + 1):
         # floor(x + 0.5) instead of round(): monotone, so steps never jump by 2
-        p = tuple(int(math.floor(c + 0.5)) for c in start + (end - start) * k / n)
+        p = _ivec([math.floor(c + 0.5) for c in start + (end - start) * k / n])
         if not pts or p != pts[-1]:
-            pts.append(p)  # type: ignore[arg-type]
+            pts.append(p)
     return pts
 
 
 def beams_from_segments_lattice(
-    segments: list[tuple[np.ndarray, np.ndarray]], max_len: float = 40
+    segments: list[tuple[np.ndarray, np.ndarray]], max_len: float = 40, kind: str = "edge"
 ) -> list[Beam]:
-    """Restrict segments to the 1 m lattice and merge them into maximal straight beams.
-
-    Every beam starts and ends on a grid point and points along a cube edge, face diagonal
-    or space diagonal. Overlapping paths are de-duplicated at the 1-step level.
-    """
+    """Restrict segments to the 26 cube directions and merge them into maximal straight beams."""
+    canon = set(LATTICE_DIRECTIONS)
     edges: dict[Vec, set[Vec]] = {d: set() for d in LATTICE_DIRECTIONS}
     for a, b in segments:
         pts = lattice_walk(a, b)
         for p, q in zip(pts, pts[1:]):
-            step = tuple(qc - pc for pc, qc in zip(p, q))
-            d, flipped = _canonical_step(step)  # type: ignore[arg-type]
-            edges[d].add(q if flipped else p)
+            step = _ivec([qc - pc for pc, qc in zip(p, q)])
+            if step in canon:
+                edges[step].add(p)
+            else:
+                edges[_ivec([-c for c in step])].add(q)
 
     beams: list[Beam] = []
     for d, starts in edges.items():
-        step_len = math.sqrt(sum(c * c for c in d))
-        max_steps = max(int(max_len / step_len + 1e-9), 1) if max_len > 0 else 10**9
+        max_steps = max(int(max_len / math.sqrt(sum(c * c for c in d)) + 1e-9), 1)
         for p in starts:
-            prev = tuple(pc - dc for pc, dc in zip(p, d))
-            if prev in starts:
+            if _ivec([pc - dc for pc, dc in zip(p, d)]) in starts:
                 continue  # not the beginning of a chain
-            length = 0
-            q = p
+            length, q = 0, p
             while q in starts:
-                q = tuple(qc + dc for qc, dc in zip(q, d))
+                q = _ivec([qc + dc for qc, dc in zip(q, d)])
                 length += 1
-            pos = 0
-            while pos < length:
+            for pos in range(0, length, max_steps):
                 n = min(max_steps, length - pos)
-                s = tuple(pc + dc * pos for pc, dc in zip(p, d))
-                e = tuple(pc + dc * (pos + n) for pc, dc in zip(p, d))
-                beams.append(Beam(s, e))  # type: ignore[arg-type]
-                pos += n
+                s = _ivec([pc + dc * pos for pc, dc in zip(p, d)])
+                e = _ivec([pc + dc * (pos + n) for pc, dc in zip(p, d)])
+                beams.append(Beam(s, e, kind))
     return beams
 
 
-# --------------------------------------------------------------------------- ordering
+# --------------------------------------------------------------------------- polylines
+
+
+def simplify_polyline(points: np.ndarray, tol: float, closed: bool = False) -> np.ndarray:
+    """Douglas-Peucker. Keeps a subset of the input vertices (so integer input stays integer)."""
+    pts = np.asarray(points, dtype=float)
+    if len(pts) < 3:
+        return pts
+    if closed:
+        # split the loop at the vertex farthest from the first one
+        far = int(np.argmax(np.linalg.norm(pts - pts[0], axis=1)))
+        if far == 0:
+            return pts[:1]
+        a = simplify_polyline(pts[: far + 1], tol)
+        b = simplify_polyline(np.vstack([pts[far:], pts[:1]]), tol)
+        return np.vstack([a[:-1], b[:-1]])
+
+    keep = np.zeros(len(pts), dtype=bool)
+    keep[0] = keep[-1] = True
+    stack = [(0, len(pts) - 1)]
+    while stack:
+        i, j = stack.pop()
+        if j <= i + 1:
+            continue
+        seg = pts[j] - pts[i]
+        seg_len = np.linalg.norm(seg)
+        rel = pts[i + 1 : j] - pts[i]
+        if seg_len < 1e-12:
+            d = np.linalg.norm(rel, axis=1)
+        else:
+            d = np.linalg.norm(np.cross(rel, seg / seg_len), axis=1)
+        k = int(np.argmax(d))
+        if d[k] > tol:
+            m = i + 1 + k
+            keep[m] = True
+            stack += [(i, m), (m, j)]
+    return pts[keep]
+
+
+def polyline_to_beams(
+    points: np.ndarray, tol: float, max_len: float, kind: str, closed: bool = False
+) -> list[Beam]:
+    """Snap a dense polyline to the grid, straighten it within `tol` and cut it into beams."""
+    pts = np.floor(np.asarray(points, dtype=float) + 0.5).astype(int)
+    if len(pts) == 0:
+        return []
+    keep = np.ones(len(pts), dtype=bool)
+    keep[1:] = np.any(pts[1:] != pts[:-1], axis=1)
+    pts = pts[keep]
+    if closed and len(pts) > 1 and (pts[0] == pts[-1]).all():
+        pts = pts[:-1]
+    if len(pts) < 2:
+        return []
+    simple = simplify_polyline(pts, tol, closed=closed).astype(int)
+    if closed and len(simple) > 2:
+        simple = np.vstack([simple, simple[:1]])
+    beams: list[Beam] = []
+    for a, b in zip(simple, simple[1:]):
+        beams.extend(split_segment(a, b, max_len, kind))
+    return beams
+
+
+def split_segment(start: np.ndarray, end: np.ndarray, max_len: float, kind: str = "") -> list[Beam]:
+    """Snap a segment to the integer grid and split it into pieces no longer than max_len."""
+    start = np.asarray(start, dtype=float)
+    end = np.asarray(end, dtype=float)
+    length = float(np.linalg.norm(end - start))
+    pieces = max(int(math.ceil(length / max_len)), 1) if max_len > 0 else 1
+    # Rounding can push a piece slightly over max_len; add pieces until it fits.
+    while True:
+        pts = [_ivec(np.floor(start + (end - start) * k / pieces + 0.5)) for k in range(pieces + 1)]
+        beams = [Beam(p, q, kind) for p, q in zip(pts, pts[1:]) if p != q]
+        if max_len <= 0 or all(b.length <= max_len + 1e-9 for b in beams) or pieces > 1000:
+            return beams
+        pieces += 1
+
+
+def beams_from_segments(
+    segments: list[tuple[np.ndarray, np.ndarray]], max_len: float = 40, kind: str = "edge"
+) -> list[Beam]:
+    """Free directions: snap each segment's endpoints to the grid (any integer vector)."""
+    seen: set[Beam] = set()
+    out: list[Beam] = []
+    for s, e in segments:
+        for beam in split_segment(s, e, max_len, kind):
+            key = beam.canonical()
+            if key not in seen:
+                seen.add(key)
+                out.append(beam)
+    return out
+
+
+# --------------------------------------------------------------------------- voxels
+
+
+def beams_from_voxels(
+    grid: np.ndarray, max_len: float = 40, directions: str = "26", axis: str | None = None
+) -> list[Beam]:
+    """Cover every filled voxel with as few beams as possible (greedy set cover).
+
+    Voxel (i, j, k) has its centre at integer position (i, j, k). Candidate beams are straight
+    runs of filled voxels along the allowed directions (3 axes, or all 13 cube directions incl.
+    diagonals). Beams may overlap - clipping is free in-game - so the greedy picks whichever
+    beam covers the most still-uncovered voxels, preferring axis directions on ties.
+    """
+    if axis:
+        dirs = [AXIS_DIRECTIONS["xyz".index(axis)]]
+    else:
+        dirs = AXIS_DIRECTIONS if directions == "6" else LATTICE_DIRECTIONS
+    filled = {_ivec(p) for p in np.argwhere(grid)}
+    if not filled:
+        return []
+
+    # candidate runs: maximal lines through filled voxels, cut into windows <= max length
+    candidates: list[tuple[Vec, list[Vec]]] = []
+    for d in dirs:
+        step_len = math.sqrt(sum(c * c for c in d))
+        max_steps = max(int(max_len / step_len + 1e-9), 1)
+        for p in filled:
+            if _ivec([a - b for a, b in zip(p, d)]) in filled:
+                continue
+            line = [p]
+            while (q := _ivec([a + b for a, b in zip(line[-1], d)])) in filled:
+                line.append(q)
+            if len(line) == 1:
+                continue
+            # overlapping windows so the greedy can choose where long runs get cut
+            stride = max(max_steps // 2, 1)
+            s = 0
+            while True:
+                window = line[s : s + max_steps + 1]
+                candidates.append((d, window))
+                if s + max_steps >= len(line) - 1:
+                    break
+                s += stride
+
+    covered: set[Vec] = set()
+    beams: list[Beam] = []
+    # lazy greedy: priority = (-new voxels, diagonal penalty, index)
+    heap = [(-len(c[1]), 0 if c[0] in AXIS_DIRECTIONS else 1, i) for i, c in enumerate(candidates)]
+    heapq.heapify(heap)
+    while heap:
+        neg, pen, i = heapq.heappop(heap)
+        voxels = candidates[i][1]
+        gain = sum(1 for v in voxels if v not in covered)
+        if gain == 0:
+            continue
+        if gain < -neg:
+            heapq.heappush(heap, (-gain, pen, i))
+            continue
+        # trim already-covered voxels off both ends (overlap only where it saves a beam)
+        lo = next(k for k, v in enumerate(voxels) if v not in covered)
+        hi = len(voxels) - 1 - next(k for k, v in enumerate(reversed(voxels)) if v not in covered)
+        if hi == lo:  # single new voxel: 1 m stub towards a neighbour
+            lo, hi = (lo, lo + 1) if lo + 1 < len(voxels) else (lo - 1, lo)
+        voxels = voxels[lo : hi + 1]
+        beams.append(Beam(voxels[0], voxels[-1], "voxel"))
+        covered.update(voxels)
+
+    # isolated voxels with no filled neighbour in any direction: 1 m vertical stub
+    for p in filled - covered:
+        beams.append(Beam(p, (p[0], p[1], p[2] + 1), "voxel"))
+    return beams
+
+
+# --------------------------------------------------------------------------- clean-up
+
+
+def merge_collinear(beams: list[Beam], max_len: float = 40) -> list[Beam]:
+    """Remove duplicates and fuse beams that lie on the same line and overlap or touch."""
+    lines: dict[tuple, list[tuple[float, float, Beam]]] = {}
+    for b in beams:
+        v = np.array(b.vector, dtype=int)
+        if not v.any():
+            continue
+        g = math.gcd(math.gcd(abs(int(v[0])), abs(int(v[1]))), abs(int(v[2])))
+        d = v // g
+        if tuple(d) < (0, 0, 0):
+            d = -d
+        p = np.array(b.start)
+        # a line is identified exactly by its direction and p x d (same for all points on it)
+        key = (_ivec(d), _ivec(np.cross(p, d)))
+        dd = float(d @ d)
+        t0 = float(p @ d) / dd
+        t1 = float(np.array(b.end) @ d) / dd
+        lines.setdefault(key, []).append((min(t0, t1), max(t0, t1), b))
+
+    out: list[Beam] = []
+    for (d, _), items in lines.items():
+        d_arr = np.array(d)
+        unit = math.sqrt(float(d_arr @ d_arr))
+        items.sort(key=lambda it: it[0])
+        cur_lo, cur_hi, first = items[0]
+        group = [first]
+        for lo, hi, b in items[1:]:
+            if lo <= cur_hi + 1e-9 and (max(hi, cur_hi) - cur_lo) * unit <= max_len + 1e-9:
+                cur_hi = max(cur_hi, hi)
+                group.append(b)
+            elif hi <= cur_hi + 1e-9:
+                group.append(b)  # fully contained in the current span: drop it
+            else:
+                out.append(_span(group, cur_lo, cur_hi, d_arr))
+                cur_lo, cur_hi, group = lo, hi, [b]
+        out.append(_span(group, cur_lo, cur_hi, d_arr))
+    return out
+
+
+def _span(group: list[Beam], lo: float, hi: float, d: np.ndarray) -> Beam:
+    ends = [p for b in group for p in (b.start, b.end)]
+    dd = float(d @ d)
+    start = min(ends, key=lambda p: abs(float(np.array(p) @ d) / dd - lo))
+    end = min(ends, key=lambda p: abs(float(np.array(p) @ d) / dd - hi))
+    kind = max(group, key=lambda b: b.length).kind
+    return Beam(start, end, kind)
 
 
 def sort_for_building(beams: list[Beam]) -> list[Beam]:

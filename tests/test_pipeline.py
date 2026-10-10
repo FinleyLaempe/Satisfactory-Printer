@@ -8,11 +8,30 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "examples"))
 
-from make_examples import cube  # noqa: E402
-from satisfactory_printer.beams import Beam, beams_from_mesh_edges, beams_from_voxels, split_segment  # noqa: E402
+from make_examples import cube, house, ramp, save_stl_ascii, sphere  # noqa: E402
+from satisfactory_printer import surfaces  # noqa: E402
+from satisfactory_printer.beams import (  # noqa: E402
+    Beam,
+    beams_from_segments_lattice,
+    beams_from_voxels,
+    lattice_walk,
+    merge_collinear,
+    simplify_polyline,
+    split_segment,
+)
 from satisfactory_printer.cli import main  # noqa: E402
+from satisfactory_printer.metrics import evaluate  # noqa: E402
 from satisfactory_printer.plan import DEFAULT_CONFIG, build_plan  # noqa: E402
 from satisfactory_printer.voxelize import hollow, scale_to_grid, voxelize_solid  # noqa: E402
+
+
+def _lattice_points(b: Beam):
+    v = np.array(b.vector)
+    n = int(np.abs(v).max())
+    return {tuple(np.array(b.start) + v // n * k) for k in range(n + 1)}
+
+
+# --------------------------------------------------------------------------- voxels
 
 
 def test_cube_voxelizes_solid():
@@ -25,29 +44,130 @@ def test_hollow_removes_interior():
     assert hollow(grid).sum() == 5**3 - 3**3
 
 
-def test_voxel_beams_cover_every_voxel_exactly_once():
+def test_voxel_beams_cover_every_voxel_and_stay_inside():
     rng = np.random.default_rng(0)
-    grid = rng.random((7, 6, 5)) > 0.4
-    beams = beams_from_voxels(grid, max_len=3)
-    covered = np.zeros_like(grid, dtype=int)
+    grid = rng.random((9, 8, 7)) > 0.4
+    filled = {tuple(p) for p in np.argwhere(grid)}
+    beams = beams_from_voxels(grid, max_len=5)
+    covered = set()
     for b in beams:
-        assert 1 <= b.length <= 3
-        lo = np.minimum(b.start, b.end)
-        hi = np.maximum(b.start, b.end)
-        hi = np.where(hi == lo, hi + 1, hi)
-        covered[lo[0] : hi[0], lo[1] : hi[1], lo[2] : hi[2]] += 1
-    assert (covered == grid.astype(int)).all()
+        assert 1 <= b.length <= 5 + 1e-9
+        assert max(abs(c) for c in b.vector) == min(abs(c) for c in b.vector if c)  # cube direction
+        pts = _lattice_points(b)
+        covered |= pts
+        if len(pts & filled) > 1:  # (isolated voxels get a 1 m stub into empty space)
+            assert pts <= filled
+    assert filled <= covered
 
 
-def test_wireframe_cube_has_12_edges():
-    beams = beams_from_mesh_edges(scale_to_grid(cube(), size=5))
-    assert len(beams) == 12 and all(b.length == 5 for b in beams)
+def test_voxel_mixes_axes_and_uses_long_beams():
+    grid = np.zeros((30, 30, 30), dtype=bool)
+    grid[:, 0, 0] = True  # 30 m along x
+    grid[0, :, 5] = True  # 30 m along y
+    grid[5, 5, :] = True  # 30 m along z
+    beams = beams_from_voxels(grid, max_len=40, directions="6")
+    assert len(beams) == 3
+    assert sorted(b.length for b in beams) == [29, 29, 29]
+
+
+def test_voxel_diagonal_staircase_becomes_one_beam():
+    grid = np.zeros((10, 3, 10), dtype=bool)
+    for i in range(10):
+        grid[i, 1, i] = True  # a 45° slope, one voxel thick
+    beams = beams_from_voxels(grid, max_len=40)
+    assert len(beams) == 1 and beams[0].vector in ((9, 0, 9), (-9, 0, -9))
+
+
+# --------------------------------------------------------------------------- helpers
+
+
+def test_lattice_walk_is_26_connected():
+    pts = lattice_walk(np.array([0.5, 0.5, 0.5]), np.array([17.3, -6.5, 9.5]))
+    for p, q in zip(pts, pts[1:]):
+        assert max(abs(a - b) for a, b in zip(p, q)) == 1
+
+
+def test_lattice_beams_only_use_cube_directions():
+    segs = [
+        (np.array([0, 0, 0]), np.array([50, 0, 0])),  # longer than max_len
+        (np.array([0, 0, 0]), np.array([5, 5, 5])),
+        (np.array([0, 0, 0]), np.array([7, 3, 1])),
+    ]
+    beams = beams_from_segments_lattice(segs, max_len=40)
+    for b in beams:
+        v = np.abs(np.array(b.vector))
+        assert set(np.unique(v)) <= {0, v.max()} and b.length <= 40 + 1e-9
+    assert Beam((0, 0, 0), (5, 5, 5)) in beams
 
 
 def test_split_respects_max_length():
-    pieces = split_segment(np.array([0, 0, 0]), np.array([30, 7, 3]), 12)
-    assert all(p.length <= 12 for p in pieces)
-    assert pieces[0].start == (0, 0, 0) and pieces[-1].end == (30, 7, 3)
+    pieces = split_segment(np.array([0, 0, 0]), np.array([90, 17, 3]), 40)
+    assert all(p.length <= 40 for p in pieces)
+    assert pieces[0].start == (0, 0, 0) and pieces[-1].end == (90, 17, 3)
+
+
+def test_simplify_keeps_corners_and_drops_noise():
+    xs = np.arange(0, 21)
+    line = np.stack([xs, (xs > 10) * (xs - 10), np.zeros_like(xs)], axis=1).astype(float)
+    line[3, 1] += 0.2  # noise below tolerance
+    simple = simplify_polyline(line, tol=0.5)
+    assert [tuple(p) for p in simple] == [(0, 0, 0), (10, 0, 0), (20, 10, 0)]
+
+
+def test_merge_collinear_fuses_overlaps_and_respects_max_len():
+    beams = [Beam((0, 0, 0), (10, 0, 0)), Beam((5, 0, 0), (20, 0, 0)), Beam((20, 0, 0), (0, 0, 0)),
+             Beam((0, 0, 0), (2, 2, 0)), Beam((2, 2, 0), (6, 6, 0)), Beam((0, 1, 0), (5, 1, 0))]
+    merged = merge_collinear(beams, max_len=40)
+    vecs = sorted(tuple(abs(c) for c in b.vector) for b in merged)
+    assert vecs == [(5, 0, 0), (6, 6, 0), (20, 0, 0)]
+    long = merge_collinear([Beam((0, 0, 0), (30, 0, 0)), Beam((30, 0, 0), (60, 0, 0))], max_len=40)
+    assert len(long) == 2
+
+
+# --------------------------------------------------------------------------- surfaces
+
+
+def test_planar_regions_of_house():
+    topo = surfaces.build_topology(scale_to_grid(house(), size=20))
+    regions, curved = surfaces.find_planar_regions(topo)
+    assert len(regions) == 7  # 4 walls + floor + 2 roof planes (gables merge with end walls)
+    assert not curved.any()
+
+
+def test_sloped_plane_gets_diagonal_beams():
+    """The ramp's 30° slope must be built from beams running down the slope, not a staircase."""
+    tris = scale_to_grid(ramp(), size=20)
+    topo = surfaces.build_topology(tris)
+    regions, _ = surfaces.find_planar_regions(topo)
+    slope = next(r for r in regions if 0.1 < abs(r.normal[2]) < 0.95)
+    beams = surfaces.hatch_region(topo, slope, 1.0, 40)
+    assert beams and all(b.vector[0] != 0 and b.vector[2] != 0 for b in beams)  # rise along x and z
+    assert max(b.length for b in beams) > 15
+
+
+def test_hybrid_house_is_accurate():
+    tris = scale_to_grid(house(), size=20)
+    beams = merge_collinear(surfaces.beams_hybrid(surfaces.build_topology(tris)))
+    m = evaluate(beams, tris)
+    assert m["coverage_pct"] > 97 and m["mean_dev_m"] < 0.4 and m["stray_pct"] < 1
+    assert any(b.kind == "edge" for b in beams)
+
+
+def test_contour_sphere_is_closed_surface():
+    tris = scale_to_grid(sphere(), size=16)
+    beams = surfaces.beams_from_contours(tris)
+    m = evaluate(beams, tris)
+    assert m["coverage_pct"] > 97 and m["stray_pct"] < 2
+    assert {b.kind for b in beams} == {"ring", "arc"}
+
+
+def test_wireframe_cube_has_12_edges():
+    topo = surfaces.build_topology(scale_to_grid(cube(), size=5))
+    beams = surfaces.beams_from_mesh_edges(topo)
+    assert len(beams) == 12 and all(b.length == 5 for b in beams)
+
+
+# --------------------------------------------------------------------------- plan / cli
 
 
 def test_plan_nudges_reproduce_beam():
@@ -56,7 +176,7 @@ def test_plan_nudges_reproduce_beam():
     beam = Beam((2, 3, 1), (5, -1, 4))
     (step,), _, _ = build_plan([beam], cfg)
     inverse = {v: k for k, v in cfg["keys"].items()}
-    pos, phase, vectors = np.zeros(3, int), 0, []
+    pos, vectors = np.zeros(3, int), []
     for a in step.actions:
         if a.kind == "key" and a.key in inverse and inverse[a.key] != "lock":
             sign = 1 if inverse[a.key][0] == "+" else -1
@@ -69,40 +189,13 @@ def test_plan_nudges_reproduce_beam():
     assert tuple(shape + place) == beam.start and tuple(place) == beam.end
 
 
-def test_cli_build(tmp_path):
-    from make_examples import save_stl_ascii
-
-    stl = tmp_path / "c.stl"
-    save_stl_ascii(stl, cube())
-    assert main(["build", str(stl), "--size", "3", "-o", str(tmp_path / "out")]) == 0
-    plan = json.loads((tmp_path / "out" / "plan.json").read_text())
-    assert plan["beams"]
-
-
-def test_lattice_walk_is_26_connected():
-    from satisfactory_printer.beams import lattice_walk
-
-    pts = lattice_walk(np.array([0.5, 0.5, 0.5]), np.array([17.3, -6.5, 9.5]))
-    for p, q in zip(pts, pts[1:]):
-        assert max(abs(a - b) for a, b in zip(p, q)) == 1
-
-
-def test_lattice_beams_only_use_cube_directions():
-    from satisfactory_printer.beams import beams_from_segments_lattice
-
-    segs = [
-        (np.array([0, 0, 0]), np.array([20, 0, 0])),  # straight, longer than max_len
-        (np.array([0, 0, 0]), np.array([5, 5, 5])),  # space diagonal
-        (np.array([0, 0, 0]), np.array([10, 0, 0])),  # overlaps the first one
-        (np.array([0, 0, 0]), np.array([7, 3, 1])),  # arbitrary -> staircase of allowed steps
-    ]
-    beams = beams_from_segments_lattice(segs, max_len=12)
-    for b in beams:
-        v = np.array(b.vector)
-        steps = np.abs(v).max()
-        assert set(np.unique(np.abs(v))) <= {0, steps}  # direction components are 0 or ±1 * steps
-        assert b.length <= 12 + 1e-9
-    assert Beam((0, 0, 0), (5, 5, 5)) in beams
-    straight = [b for b in beams if b.vector[1] == 0 and b.vector[2] == 0 and b.start[1:] == (0, 0)]
-    assert sum(abs(b.vector[0]) for b in straight) >= 20  # x axis covered once, no duplicates beyond overlap
-
+def test_cli_all_modes(tmp_path):
+    stl = tmp_path / "h.stl"
+    save_stl_ascii(stl, house())
+    for mode in ("hybrid", "planes", "contour", "voxel", "wireframe"):
+        out = tmp_path / mode
+        assert main(["build", str(stl), "--size", "12", "--mode", mode, "-o", str(out)]) == 0
+        plan = json.loads((out / "plan.json").read_text())
+        assert plan["beams"] and all(b["length"] <= 40 for b in plan["beams"])
+        html = (out / "preview.html").read_text()
+        assert "const DATA = {" in html and "__DATA__" not in html
