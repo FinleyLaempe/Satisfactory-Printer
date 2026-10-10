@@ -216,8 +216,10 @@ def test_plan_nudges_reproduce_beam():
             vectors.append(pos.copy())
             pos[:] = 0
     shape, place = vectors
-    # beam drawn from (anchor + shape) to anchor, then moved by place
-    assert tuple(shape + place) == beam.start and tuple(place) == beam.end
+    # beam drawn from (anchor + shape) to anchor, then moved by place. The plan may draw it
+    # from either end (the one nearer the anchor is placed last) - same beam either way.
+    assert {tuple(shape + place), tuple(place)} == {beam.start, beam.end}
+    assert sum(map(abs, place)) <= sum(map(abs, shape + place))
 
 
 def test_cli_all_modes(tmp_path):
