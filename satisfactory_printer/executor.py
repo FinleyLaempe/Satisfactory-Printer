@@ -3,7 +3,7 @@
 Run this on the Windows PC where Satisfactory runs. It uses `pydirectinput` (DirectInput scan
 codes, which games actually register); falls back to `pynput` if that's not installed.
 
-Hotkeys while running (needs `pynput`):  F8 = pause / resume,  F9 = abort.
+Hotkeys while running (needs `pynput`):  F8 = pause / resume (between beams),  F9 = abort now.
 """
 
 from __future__ import annotations
@@ -18,34 +18,25 @@ from .plan import Action
 
 
 class _Control:
-    def __init__(self) -> None:
-        self.paused = threading.Event()
-        self.aborted = threading.Event()
-        self._listener = None
+    """Global hotkeys: F8 = pause / resume (between beams), F9 = abort immediately."""
+
+    def __init__(self, runner: "PlanRunner") -> None:
         try:
             from pynput import keyboard  # type: ignore
 
             def on_press(key: Any) -> None:
                 if key == keyboard.Key.f8:
-                    if self.paused.is_set():
-                        self.paused.clear()
-                        print("\n[resumed]")
-                    else:
-                        self.paused.set()
-                        print("\n[paused - press F8 to resume, F9 to abort]")
+                    runner.toggle_pause()
+                    print("\n[pause requested - stops after this beam]" if runner._pause.is_set() else "\n[resumed]")
                 elif key == keyboard.Key.f9:
-                    self.aborted.set()
+                    runner.abort()
                     print("\n[abort requested]")
 
-            self._listener = keyboard.Listener(on_press=on_press)
-            self._listener.daemon = True
-            self._listener.start()
+            listener = keyboard.Listener(on_press=on_press)
+            listener.daemon = True
+            listener.start()
         except Exception:
             print("(pynput not available: F8/F9 hotkeys disabled, use Ctrl+C in this window to stop)")
-
-    def wait_if_paused(self) -> None:
-        while self.paused.is_set() and not self.aborted.is_set():
-            time.sleep(0.05)
 
 
 class _Backend:
@@ -100,43 +91,172 @@ class _Backend:
             self._mouse.release(self._button)
 
 
-def run_plan(plan_path: str | Path, start_at: int = 0, countdown: int = 5, dry_run: bool = False) -> None:
-    plan = json.loads(Path(plan_path).read_text())
-    key_delay = float(plan["timing"]["key_delay"])
-    key_interval = float(plan["timing"]["key_interval"])
-    beams = [b for b in plan["beams"] if b["index"] >= start_at]
-    total = len(plan["beams"])
+class _NullBackend:
+    """Simulation: honours all timings but presses nothing."""
 
-    backend = None if dry_run else _Backend(key_delay)
-    control = None if dry_run else _Control()
-    if backend:
-        print(f"Input backend: {backend.name}")
-    print(f"{len(beams)} beams to place (starting at #{start_at} of {total}).")
-    if not dry_run:
-        print(f"Switch to Satisfactory now: beam selected, crosshair on the anchor. Starting in {countdown}s...")
-        for s in range(countdown, 0, -1):
-            print(f"  {s}...")
-            time.sleep(1)
+    name = "simulation (no keys pressed)"
 
-    started = time.time()
-    for b in beams:
-        print(f"beam #{b['index']}/{total - 1}  {b['start']} -> {b['end']}", flush=True)
-        for raw in b["actions"]:
-            a = Action.from_dict(raw)
-            if dry_run:
-                continue
-            assert backend and control
-            control.wait_if_paused()
-            if control.aborted.is_set():
-                print(f"Aborted. Resume later with:  --start-at {b['index']}")
+    def __init__(self, key_delay: float) -> None:
+        self.key_delay = key_delay
+
+    def press(self, key: str) -> None:
+        time.sleep(self.key_delay)
+
+    def click(self) -> None:
+        time.sleep(self.key_delay)
+
+
+def beam_duration(beam: dict, key_delay: float, key_interval: float) -> float:
+    """Seconds one beam takes to type."""
+    t = 0.0
+    for raw in beam["actions"]:
+        a = Action.from_dict(raw)
+        if a.kind == "key":
+            t += a.times * (key_delay + key_interval)
+        elif a.kind == "click":
+            t += key_delay
+        else:
+            t += a.seconds
+    return t
+
+
+class PlanRunner:
+    """Types a plan into the game in a controllable way (used by `run` and the live preview).
+
+    pause() / stop() take effect between beams so no beam is left half-placed;
+    abort() (F9) stops immediately.
+    """
+
+    def __init__(self, plan: dict, start_at: int = 0, countdown: int = 5, simulate: bool = False,
+                 hotkeys: bool = True, log=print) -> None:
+        self.plan = plan
+        self.key_delay = float(plan["timing"]["key_delay"])
+        self.key_interval = float(plan["timing"]["key_interval"])
+        self.beams = plan["beams"]
+        self.total = len(self.beams)
+        self.start_at = max(0, min(start_at, self.total))
+        self.countdown = countdown
+        self.simulate = simulate
+        self.log = log
+        self.durations = [beam_duration(b, self.key_delay, self.key_interval) for b in self.beams]
+
+        self.status = "ready"  # ready, countdown, running, paused, stopped, aborted, done, error
+        self.index = self.start_at  # beams [0, index) are placed
+        self.countdown_left = 0
+        self.message = ""
+        self.backend_name = ""
+        self._pause = threading.Event()
+        self._stop = threading.Event()
+        self._abort = threading.Event()
+        self._hotkeys = hotkeys
+
+    # ---- control
+    def pause(self) -> None:
+        self._pause.set()
+
+    def resume(self) -> None:
+        self._pause.clear()
+
+    def toggle_pause(self) -> None:
+        self.resume() if self._pause.is_set() else self.pause()
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._pause.clear()
+
+    def abort(self) -> None:
+        self._abort.set()
+        self._pause.clear()
+
+    def state(self) -> dict:
+        remaining = sum(self.durations[self.index:])
+        return {
+            "status": self.status,
+            "placed": self.index,
+            "total": self.total,
+            "countdown": self.countdown_left,
+            "eta_s": round(remaining, 1),
+            "message": self.message,
+            "backend": self.backend_name,
+        }
+
+    def start_thread(self) -> threading.Thread:
+        t = threading.Thread(target=self.run, daemon=True)
+        t.start()
+        return t
+
+    # ---- main loop
+    def run(self) -> None:
+        try:
+            backend = _NullBackend(self.key_delay) if self.simulate else _Backend(self.key_delay)
+        except ImportError:
+            self.status = "error"
+            self.message = "No input library: pip install pydirectinput pynput (Windows)"
+            self.log(self.message)
+            return
+        self.backend_name = backend.name
+        if self._hotkeys and not self.simulate:
+            _Control(self)
+        self.log(f"Input backend: {backend.name}")
+        self.log(f"{self.total - self.start_at} beams to place (starting at #{self.start_at} of {self.total}).")
+
+        self.status = "countdown"
+        self.log("Switch to Satisfactory now: beam selected, crosshair on the anchor.")
+        for s in range(self.countdown, 0, -1):
+            self.countdown_left = s
+            self.log(f"  {s}...")
+            for _ in range(10):
+                if self._abort.is_set() or self._stop.is_set():
+                    self.status = "stopped"
+                    return
+                time.sleep(0.1)
+        self.countdown_left = 0
+
+        started = time.time()
+        for i in range(self.start_at, self.total):
+            # beam boundary: honour pause / stop
+            while self._pause.is_set() and not (self._stop.is_set() or self._abort.is_set()):
+                self.status = "paused"
+                time.sleep(0.05)
+            if self._stop.is_set() or self._abort.is_set():
+                self.status = "stopped" if self._stop.is_set() else "aborted"
+                self.message = f"resume with start at beam #{i}"
+                self.log(f"Stopped. Resume later with:  --start-at {i}")
                 return
-            if a.kind == "key":
-                for _ in range(a.times):
-                    backend.press(a.key)
-                    time.sleep(key_interval)
-            elif a.kind == "click":
-                backend.click()
-            else:
-                time.sleep(a.seconds)
-    if not dry_run:
-        print(f"Done in {time.time() - started:.0f}s.")
+            self.status = "running"
+            b = self.beams[i]
+            self.log(f"beam #{i}/{self.total - 1}  {b['start']} -> {b['end']}")
+            for raw in b["actions"]:
+                if self._abort.is_set():
+                    self.status = "aborted"
+                    self.message = f"aborted during beam #{i} - cancel the hologram in-game, resume at #{i}"
+                    self.log(f"Aborted. Resume later with:  --start-at {i}")
+                    return
+                a = Action.from_dict(raw)
+                if a.kind == "key":
+                    for _ in range(a.times):
+                        backend.press(a.key)
+                        time.sleep(self.key_interval)
+                elif a.kind == "click":
+                    backend.click()
+                else:
+                    time.sleep(a.seconds)
+            self.index = i + 1
+        self.status = "done"
+        self.message = f"done in {time.time() - started:.0f}s"
+        self.log(f"Done in {time.time() - started:.0f}s.")
+
+
+def run_plan(plan_path: str | Path, start_at: int = 0, countdown: int = 5, dry_run: bool = False,
+             simulate: bool = False) -> None:
+    plan = json.loads(Path(plan_path).read_text())
+    if dry_run:
+        total = len(plan["beams"])
+        for b in plan["beams"][start_at:]:
+            print(f"beam #{b['index']}/{total - 1}  {b['start']} -> {b['end']}")
+        return
+    runner = PlanRunner(plan, start_at, countdown, simulate=simulate)
+    try:
+        runner.run()
+    except KeyboardInterrupt:
+        print(f"\nInterrupted. Resume later with:  --start-at {runner.index}")

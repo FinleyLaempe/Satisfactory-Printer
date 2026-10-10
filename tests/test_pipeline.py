@@ -198,4 +198,57 @@ def test_cli_all_modes(tmp_path):
         plan = json.loads((out / "plan.json").read_text())
         assert plan["beams"] and all(b["length"] <= 40 for b in plan["beams"])
         html = (out / "preview.html").read_text()
-        assert "const DATA = {" in html and "__DATA__" not in html
+        assert "let DATA = {" in html and "__DATA__" not in html
+
+
+# --------------------------------------------------------------------------- live preview / runner
+
+
+def test_live_session_rebuilds_and_runs(tmp_path):
+    import time
+
+    from satisfactory_printer.cli import _build_parser
+    from satisfactory_printer.server import LiveSession
+
+    stl = tmp_path / "h.stl"
+    save_stl_ascii(stl, house())
+    cfg = tmp_path / "fast.json"
+    cfg.write_text(json.dumps({"click_delay": 0, "beam_delay": 0}))
+    args = _build_parser().parse_args(["serve", str(stl), "--size", "10", "-o", str(tmp_path / "live"), "-c", str(cfg)])
+    session = LiveSession(args)
+    small = session.preview(session.params({"size": ["10"]}))
+    big = session.preview(session.params({"size": ["30"]}))
+    assert len(big["beams"]) > len(small["beams"]) and big["timing"]["presses"] > 0
+    assert "surface coverage" in session.metrics(session.params({"size": ["10"]}))
+
+    st = session.run_start(session.params({"size": ["10"], "kps": ["100"], "countdown": ["0"],
+                                           "simulate": ["1"], "start_at": ["2"]}))
+    assert st["status"] in ("ready", "countdown", "running") and st["total"] == len(small["beams"])
+    assert session.run_start(session.params({}))["error"]  # only one run at a time
+    deadline = time.time() + 30
+    while session.run_status()["status"] not in ("done", "error") and time.time() < deadline:
+        time.sleep(0.05)
+    final = session.run_status()
+    assert final["status"] == "done" and final["placed"] == final["total"]
+    assert (tmp_path / "live" / "h_hybrid_10m" / "plan.json").exists()
+
+
+def test_runner_pause_and_stop_between_beams():
+    import time
+
+    from satisfactory_printer.executor import PlanRunner
+
+    beam = {"actions": [{"key": "h", "times": 1}, {"wait": 0.05}]}
+    plan = {"timing": {"key_delay": 0.001, "key_interval": 0.001},
+            "beams": [dict(beam, index=i, start=[0, 0, 0], end=[1, 0, 0]) for i in range(200)]}
+    r = PlanRunner(plan, countdown=0, simulate=True, log=lambda *_: None)
+    r.start_thread()
+    time.sleep(0.3)
+    r.pause()
+    time.sleep(0.2)
+    placed = r.index
+    time.sleep(0.2)
+    assert r.status == "paused" and r.index == placed
+    r.stop()
+    time.sleep(0.2)
+    assert r.status == "stopped" and 0 < r.index < 200

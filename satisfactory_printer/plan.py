@@ -79,6 +79,18 @@ def load_config(path: str | Path | None) -> dict[str, Any]:
     return cfg
 
 
+def apply_speed(cfg: dict[str, Any], kps: float | None) -> dict[str, Any]:
+    """Return a copy of cfg whose key timing gives `kps` keystrokes per second."""
+    if not kps:
+        return cfg
+    per_press = 1.0 / max(float(kps), 0.1)
+    return {**cfg, "key_delay": per_press / 2, "key_interval": per_press / 2}
+
+
+def keystrokes_per_second(cfg: dict[str, Any]) -> float:
+    return 1.0 / (float(cfg["key_delay"]) + float(cfg["key_interval"]))
+
+
 @dataclass
 class Action:
     kind: str  # "key", "click", "wait"

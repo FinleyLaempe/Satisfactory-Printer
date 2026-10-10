@@ -2,6 +2,7 @@
 
   python -m satisfactory_printer build   model.stl --size 30 -o out   # 3D model -> keystroke plan
   python -m satisfactory_printer compare model.stl --size 30 -o cmp   # try every mode
+  python -m satisfactory_printer serve   model.stl                    # live preview with sliders
   python -m satisfactory_printer run     out/plan.json                # type it into the game
 """
 
@@ -11,14 +12,17 @@ import argparse
 import json
 import sys
 import webbrowser
+from dataclasses import dataclass, replace
 from pathlib import Path
+
+import numpy as np
 
 from . import beams as beam_mod
 from . import surfaces
 from .mesh import load_mesh
-from .plan import build_plan, load_config, plan_to_json, plan_to_text
+from .plan import apply_speed, build_plan, keystrokes_per_second, load_config, plan_to_json, plan_to_text
 from .preview import ascii_layers, export_obj
-from .preview_html import export_html
+from .preview_html import export_html, make_preview_data
 from .voxelize import hollow, scale_to_grid, voxelize_solid, voxelize_surface
 
 MODES = ["hybrid", "planes", "contour", "voxel", "wireframe"]
@@ -66,16 +70,28 @@ def generate(tris, args, max_len: float):
     return beams, tris, None
 
 
-def _cmd_build(args: argparse.Namespace) -> int:
-    cfg = load_config(args.config)
+@dataclass
+class BuildResult:
+    name: str
+    mode: str
+    beams: list
+    mesh: np.ndarray  # original surface in beam coordinates
+    grid: np.ndarray | None
+    raw_count: int
+    steps: list
+    offset: tuple[int, int, int]
+    warnings: list[str]
+    cfg: dict
+    key_text: str
+
+
+def run_build(raw_tris: np.ndarray, args: argparse.Namespace, name: str = "model") -> BuildResult:
+    """Scale the model, generate + merge + order beams and turn them into a keystroke plan."""
+    cfg = apply_speed(load_config(args.config), getattr(args, "kps", None))
     if args.max_beam_length:
         cfg["max_beam_length"] = args.max_beam_length
     max_len = float(cfg["max_beam_length"])
-    out = Path(args.output)
-    out.mkdir(parents=True, exist_ok=True)
-    src = Path(args.input)
-
-    tris = scale_to_grid(load_mesh(src), size=args.size, scale=args.scale)
+    tris = scale_to_grid(raw_tris, size=args.size, scale=args.scale)
     beams, mesh, grid = generate(tris, args, max_len)
     raw_count = len(beams)
     if not args.no_merge:
@@ -83,59 +99,96 @@ def _cmd_build(args: argparse.Namespace) -> int:
     beams = beam_mod.sort_for_building(beams)
     if args.limit:
         beams = beams[: args.limit]
-    if not beams:
-        print("Model produced no beams (too small? try a bigger --size).", file=sys.stderr)
-        return 1
+    steps, offset, warnings = build_plan(beams, cfg) if beams else ([], (0, 0, 0), [])
+    return BuildResult(name, args.mode, beams, mesh, grid, raw_count, steps, offset, warnings, cfg,
+                       plan_to_text(steps) if steps else "")
 
-    steps, offset, warnings = build_plan(beams, cfg)
-    (out / "plan.json").write_text(json.dumps(plan_to_json(steps, offset, cfg), indent=1))
-    key_text = plan_to_text(steps)
-    (out / "keys.txt").write_text(key_text)
-    export_obj(beams, out / "preview.obj")
-    if grid is not None:
-        (out / "layers.txt").write_text(ascii_layers(grid))
 
-    presses = sum(s.key_presses for s in steps)
-    per_press = cfg["key_delay"] + cfg["key_interval"]
-    est = presses * per_press + sum(a.seconds for s in steps for a in s.actions if a.kind == "wait")
-    total_len = sum(b.length for b in beams)
-    diag = sum(1 for b in beams if sum(1 for c in b.vector if c) > 1)
-    pts = mesh.reshape(-1, 3)
+def with_speed(res: BuildResult, kps: float | None) -> BuildResult:
+    return replace(res, cfg=apply_speed(res.cfg, kps))
+
+
+def _timing(res: BuildResult) -> dict[str, float]:
+    return {
+        "presses": sum(s.key_presses for s in res.steps),
+        "wait_s": round(sum(a.seconds for s in res.steps for a in s.actions if a.kind == "wait"), 2),
+        "kps": round(keystrokes_per_second(res.cfg), 2),
+    }
+
+
+def summary_stats(res: BuildResult) -> dict[str, str]:
+    t = _timing(res)
+    presses = t["presses"]
+    est = presses / t["kps"] + t["wait_s"]
+    pts = res.mesh.reshape(-1, 3)
     size = pts.max(axis=0) - pts.min(axis=0)
-
-    stats = {
-        "mode": args.mode,
+    beams = res.beams
+    return {
+        "mode": res.mode,
         "model size": f"{size[0]:.0f} × {size[1]:.0f} × {size[2]:.0f} m",
-        "beams": f"{len(beams)}" + (f" (merged from {raw_count})" if raw_count != len(beams) else ""),
-        "diagonal beams": f"{diag}",
-        "longest beam": f"{max(b.length for b in beams):.1f} m",
-        "total beam length": f"{total_len:.0f} m",
+        "beams": f"{len(beams)}" + (f" (merged from {res.raw_count})" if res.raw_count != len(beams) else ""),
+        "diagonal beams": f"{sum(1 for b in beams if sum(1 for c in b.vector if c) > 1)}",
+        "longest beam": f"{max((b.length for b in beams), default=0):.1f} m",
+        "total beam length": f"{sum(b.length for b in beams):.0f} m",
         "key presses": f"{presses}",
         "est. build time": f"{est / 60:.1f} min",
     }
-    if not args.no_metrics:
-        from .metrics import evaluate
 
-        m = evaluate(beams, mesh)
-        stats["surface coverage"] = f"{m['coverage_pct']}%"
-        stats["mean deviation"] = f"{m['mean_dev_m']} m (95%: {m['p95_dev_m']} m)"
-        stats["stray beam length"] = f"{m['stray_pct']}%"
 
-    export_html(
-        out / "preview.html", beams, mesh, offset, stats,
-        [line.split(":  ", 1)[-1] for line in key_text.splitlines()],
-        title=f"{src.name} – {args.mode}",
+def metric_stats(res: BuildResult) -> dict[str, str]:
+    from .metrics import evaluate
+
+    m = evaluate(res.beams, res.mesh)
+    return {
+        "surface coverage": f"{m['coverage_pct']}%",
+        "mean deviation": f"{m['mean_dev_m']} m (95%: {m['p95_dev_m']} m)",
+        "stray beam length": f"{m['stray_pct']}%",
+    }
+
+
+def write_outputs(res: BuildResult, out: Path, stats: dict[str, str]) -> list[str]:
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "plan.json").write_text(json.dumps(plan_to_json(res.steps, res.offset, res.cfg), indent=1))
+    (out / "keys.txt").write_text(res.key_text)
+    export_obj(res.beams, out / "preview.obj")
+    files = ["plan.json", "keys.txt", "preview.html", "preview.obj"]
+    if res.grid is not None:
+        (out / "layers.txt").write_text(ascii_layers(res.grid))
+        files.append("layers.txt")
+    export_html(out / "preview.html", preview_data(res, stats))
+    return files
+
+
+def preview_data(res: BuildResult, stats: dict[str, str]) -> dict:
+    data = make_preview_data(
+        res.beams, res.mesh, res.offset, stats,
+        [line.split(":  ", 1)[-1] for line in res.key_text.splitlines()],
+        title=f"{res.name} – {res.mode}",
     )
+    data["timing"] = _timing(res)
+    return data
+
+
+def _cmd_build(args: argparse.Namespace) -> int:
+    src = Path(args.input)
+    res = run_build(load_mesh(src), args, src.name)
+    if not res.beams:
+        print("Model produced no beams (too small? try a bigger --size).", file=sys.stderr)
+        return 1
+    stats = summary_stats(res)
+    if not args.no_metrics:
+        stats.update(metric_stats(res))
+    out = Path(args.output)
+    files = write_outputs(res, out, stats)
 
     for k, v in stats.items():
         print(f"{k + ':':20s}{v}")
-    print(f"{'model offset:':20s}{offset} (relative to anchor)")
-    for w in warnings[:10]:
+    print(f"{'model offset:':20s}{res.offset} (relative to anchor)")
+    for w in res.warnings[:10]:
         print("WARNING:", w)
-    if len(warnings) > 10:
-        print(f"... {len(warnings) - 10} more warnings")
-    files = "plan.json, keys.txt, preview.html, preview.obj" + (", layers.txt" if grid is not None else "")
-    print(f"written to {out}/ : {files}")
+    if len(res.warnings) > 10:
+        print(f"... {len(res.warnings) - 10} more warnings")
+    print(f"written to {out}/ : {', '.join(files)}")
     if args.open:
         webbrowser.open((out / "preview.html").resolve().as_uri())
     return 0
@@ -156,10 +209,17 @@ def _cmd_compare(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_serve(args: argparse.Namespace) -> int:
+    from .server import serve
+
+    return serve(args)
+
+
 def _cmd_run(args: argparse.Namespace) -> int:
     from .executor import run_plan
 
-    run_plan(args.plan, start_at=args.start_at, countdown=args.countdown, dry_run=args.dry_run)
+    run_plan(args.plan, start_at=args.start_at, countdown=args.countdown, dry_run=args.dry_run,
+             simulate=args.simulate)
     return 0
 
 
@@ -172,12 +232,7 @@ def _add_model_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("-c", "--config", help="JSON config overriding the defaults (see config.example.json)")
 
 
-def _build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="satisfactory_printer", description="3D model -> Satisfactory beam keystrokes")
-    sub = p.add_subparsers(dest="cmd", required=True)
-
-    b = sub.add_parser("build", help="convert a model into a keystroke plan + browser preview")
-    _add_model_args(b)
+def _add_build_options(b: argparse.ArgumentParser) -> None:
     b.add_argument("--mode", choices=MODES, default="hybrid",
                    help="hybrid (default): flat areas filled with in-plane beams, curved areas with "
                         "rings+ribs, sharp edges traced. planes / contour: only that part. "
@@ -209,11 +264,28 @@ def _build_parser() -> argparse.ArgumentParser:
     v.add_argument("--feature-angle", type=float, default=1.0, help="wireframe: skip edges flatter than this")
     o = b.add_argument_group("output")
     o.add_argument("--max-beam-length", type=float, help="override config max_beam_length (default 40)")
+    o.add_argument("--kps", type=float, help="typing speed in keystrokes per second (default from config: 10)")
     o.add_argument("--no-merge", action="store_true", help="don't fuse collinear overlapping beams")
     o.add_argument("--no-metrics", action="store_true", help="skip the coverage/deviation measurement")
     o.add_argument("--limit", type=int, help="only emit the first N beams (for testing)")
-    o.add_argument("--open", action="store_true", help="open preview.html in the browser")
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="satisfactory_printer", description="3D model -> Satisfactory beam keystrokes")
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    b = sub.add_parser("build", help="convert a model into a keystroke plan + browser preview")
+    _add_model_args(b)
+    _add_build_options(b)
+    b.add_argument("--open", action="store_true", help="open preview.html in the browser")
     b.set_defaults(func=_cmd_build)
+
+    sv = sub.add_parser("serve", help="live browser preview with sliders for size, mode, tolerance, spacing")
+    _add_model_args(sv)
+    _add_build_options(sv)
+    sv.add_argument("--port", type=int, default=8765, help="local port (0 = any free port)")
+    sv.add_argument("--no-browser", action="store_true", help="don't open the browser automatically")
+    sv.set_defaults(func=_cmd_serve)
 
     c = sub.add_parser("compare", help="build with every mode and compare beams / time / accuracy")
     _add_model_args(c)
@@ -224,13 +296,14 @@ def _build_parser() -> argparse.ArgumentParser:
     r.add_argument("--start-at", type=int, default=0, help="resume from this beam index")
     r.add_argument("--countdown", type=int, default=5)
     r.add_argument("--dry-run", action="store_true", help="print beams without pressing keys")
+    r.add_argument("--simulate", action="store_true", help="run with real timing but press no keys")
     r.set_defaults(func=_cmd_run)
     return p
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
-    if args.cmd in ("build", "compare") and args.size is None and args.scale is None:
+    if args.cmd in ("build", "compare", "serve") and args.size is None and args.scale is None:
         args.size = 20.0
     return args.func(args)
 

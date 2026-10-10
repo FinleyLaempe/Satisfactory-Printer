@@ -44,6 +44,10 @@ fallback, and it also provides the F8 (pause) and F9 (abort) hotkeys.
 # 3D model -> plan + browser preview. --size = largest dimension in metres
 python -m satisfactory_printer build model.stl --size 30 -o out --open
 
+# live preview: sliders for size / mode / tolerance / spacing, typing speed, and
+# a "Build in game" panel that types the plan and shows which beams are placed
+python -m satisfactory_printer serve model.stl
+
 # try every mode side by side (one folder per mode, each with preview.html)
 python -m satisfactory_printer compare model.stl --size 30 -o cmp
 
@@ -51,6 +55,7 @@ python -m satisfactory_printer compare model.stl --size 30 -o cmp
 python -m satisfactory_printer run out/plan.json --dry-run
 python -m satisfactory_printer run out/plan.json            # 5 s countdown, switch to the game
 python -m satisfactory_printer run out/plan.json --start-at 120   # resume after an abort
+python -m satisfactory_printer run out/plan.json --simulate       # real timing, no key presses
 ```
 
 `build` writes these files:
@@ -64,6 +69,27 @@ python -m satisfactory_printer run out/plan.json --start-at 120   # resume after
 | `layers.txt`   | ASCII slice of each voxel layer (voxel mode)                    |
 
 The preview loads three.js from a CDN, so it needs an internet connection.
+
+### Live preview (`serve`)
+
+`serve` starts a small local web server (127.0.0.1 only) and opens the preview with controls:
+
+- **Size, mode, tolerance, spacing sliders.** Every change rebuilds the beams and redraws
+  them. Accuracy numbers follow a moment later.
+- **Typing speed (keystrokes per second).** Updates the build-time estimate instantly and
+  sets the key timing of saved and started plans. Also available as `--kps` on `build`.
+- **Save plan.** Writes `plan.json`, `keys.txt`, `preview.html` etc. to
+  `out/<model>_<mode>_<size>m/`.
+- **Build in game.** Pick the start beam and countdown, press **Start**, then switch to
+  Satisfactory. The 3D view shows placed beams solid, the next beam red and the remaining
+  beams faint, with progress and time left. **Pause** and **Stop** take effect after the
+  current beam, so no beam is left half-placed. In-game, F8 pauses and F9 aborts at once.
+  After stopping, "Start at beam" is already set to where you left off. Tick **Simulate**
+  to rehearse the timing without pressing any keys.
+
+Run `serve` on the gaming PC itself so it can send the keys.
+
+The build-progress slider uses the same view: solid = placed, red = next, faint = still to come.
 
 ### Modes
 
@@ -132,7 +158,8 @@ is accurate to about 1.5°.
      rotated, swap the entries in `keys`.
    - **Macro.** If your game needs a different key order, edit `beam_macro`. Tokens:
      `key:lock`, `nudge:shape`, `nudge:place`, `click`, `wait:0.5`.
-   - **Timing.** If key presses get lost, raise `key_delay`, `key_interval` and `click_delay`.
+   - **Timing.** If key presses get lost, lower the typing speed (`--kps`, or the box in the
+     preview) or raise `click_delay` / `beam_delay`.
    - **Limits.** `max_beam_length` (default 40 m, the in-game maximum) splits longer beams.
 4. **Keep the line of sight clear.** If a built beam ends up between your camera and the
    anchor, the crosshair hits that beam and the anchor moves. By default the model starts 2 m
