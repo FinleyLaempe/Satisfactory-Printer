@@ -15,7 +15,7 @@ from . import beams as beam_mod
 from . import blueprint as bpmod
 from . import surfaces
 from .beams import Beam
-from .mesh import drop_base, fit_to_size, load_mesh
+from .mesh import fit_to_size, load_mesh
 from .metrics import evaluate, fill_gaps
 from .orient import face_normals, roll_steps
 from .plan import apply_speed, build_plan, keystrokes_per_second, load_config, plan_to_json, plan_to_text
@@ -29,7 +29,6 @@ FINISH_COLORS = {"caterium": "#d9a833", "copper": "#c8743f", "chrome": "#c9ced6"
 class Settings:
     # shape
     size: float = 40.0  # largest side of the model in metres
-    drop_base: float = 0.0  # remove separate parts in the bottom fraction (0 = keep everything)
     tolerance: float = 1.0  # how far (m) a straightened beam may stray from a curve
     spacing: float = 1.0  # distance between neighbouring beams (1 = closed surface)
     finish: str = ""  # caterium / copper / chrome / carbonsteel / "" (none)
@@ -45,7 +44,7 @@ class Settings:
 
     def shape_key(self) -> tuple:
         """Settings that change the beams (everything else only changes the export)."""
-        return (round(self.size, 2), round(self.drop_base, 3), round(self.tolerance, 3),
+        return (round(self.size, 2), round(self.tolerance, 3),
                 round(self.spacing, 3), self.output)
 
 
@@ -62,10 +61,7 @@ class Result:
 
 
 def load_model(path: str | Path, s: Settings) -> np.ndarray:
-    tris = load_mesh(path)
-    if s.drop_base > 0:
-        tris = drop_base(tris, s.drop_base)
-    return fit_to_size(tris, s.size)
+    return fit_to_size(load_mesh(path), s.size)
 
 
 def build(path: str | Path, s: Settings, name: str | None = None, tris: np.ndarray | None = None) -> Result:

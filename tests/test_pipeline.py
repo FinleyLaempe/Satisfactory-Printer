@@ -16,7 +16,7 @@ from satisfactory_printer import blueprint as bpmod  # noqa: E402
 from satisfactory_printer import surfaces  # noqa: E402
 from satisfactory_printer.beams import Beam, merge_collinear, set_precise, simplify_polyline, split_segment  # noqa: E402
 from satisfactory_printer.cli import main  # noqa: E402
-from satisfactory_printer.mesh import drop_base, fit_to_size  # noqa: E402
+from satisfactory_printer.mesh import fit_to_size  # noqa: E402
 from satisfactory_printer.metrics import evaluate, fill_gaps  # noqa: E402
 from satisfactory_printer.pipeline import Settings, build, export_blueprints, preview_data, stats  # noqa: E402
 from satisfactory_printer.plan import DEFAULT_CONFIG, build_plan  # noqa: E402
@@ -37,13 +37,6 @@ def test_fit_to_size():
     t = fit_to_size(cube(1.0) * np.array([2, 4, 1]) + 5, 20)
     pts = t.reshape(-1, 3)
     assert np.allclose(pts.min(axis=0), 0) and np.isclose(pts.max(), 20)
-
-
-def test_drop_base_removes_only_the_pedestal():
-    pedestal = cube(1.0) * np.array([20, 20, 2])  # wide flat block at the bottom
-    column = cube(1.0) * np.array([2, 2, 30]) + np.array([9, 9, 2])  # separate part on top
-    kept = drop_base(np.vstack([pedestal, column]), 0.16)
-    assert len(kept) == len(column) and kept[..., 2].min() >= 2
 
 
 # --------------------------------------------------------------------------- beam helpers

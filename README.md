@@ -17,8 +17,6 @@ Der Browser öffnet die App. Dort kannst du:
 - **Modell** auswählen oder hochladen. Du kannst die Datei auch einfach ins Fenster ziehen.
   Hochgeladene Modelle landen in `models/`. Der Ordner wird nie zu GitHub hochgeladen, er
   ist also auch für Modelle geeignet, die du aus Spielen extrahiert hast.
-- **Sockel entfernen**: Einzelteile, die komplett im unteren Teil der Höhe liegen, fallen
-  weg (z. B. 16 %).
 - **Form** einstellen:
   - Größe (längste Seite, 5–200 m);
   - Detail (Toleranz): kleiner heißt genauer, aber mehr Träger;
@@ -112,7 +110,7 @@ Alles aus der App geht auch ohne Browser:
 
 ```bash
 # Blueprint
-python -m satisfactory_printer blueprint models/statue.stl --size 70 --drop-base 0.16 --finish caterium -o out_bp
+python -m satisfactory_printer blueprint models/statue.stl --size 70 --finish caterium -o out_bp
 # Tastatur-Plan, dann eintippen
 python -m satisfactory_printer keys models/statue.stl --size 40 -o out_keys
 python -m satisfactory_printer run out_keys/plan.json --start-at 120

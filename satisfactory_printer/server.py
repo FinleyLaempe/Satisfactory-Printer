@@ -78,7 +78,6 @@ class App:
         model = q.get("model", [models[0]["id"] if models else ""])[0]
         s = Settings(
             size=_num(q, "size", 40, 3, 300),
-            drop_base=_num(q, "drop_base", 0, 0, 0.9),
             tolerance=_num(q, "tolerance", 1.0, 0.1, 5),
             spacing=_num(q, "spacing", 1.0, 1, 5),
             finish=q.get("finish", [""])[0] if q.get("finish", [""])[0] in pipeline.FINISH_COLORS else "",

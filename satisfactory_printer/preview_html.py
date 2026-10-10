@@ -143,8 +143,6 @@ _TEMPLATE = r"""<!doctype html>
     <label>Modell <select id="model"></select></label>
     <div class="row"><button id="uploadBtn">Hochladen…</button><span class="note">oder Datei ins Fenster ziehen</span>
       <input type="file" id="file" accept=".stl,.obj" hidden></div>
-    <label><input type="checkbox" id="baseOn"> Sockel entfernen <output id="baseOut"></output></label>
-    <input type="range" id="base" min="0.05" max="0.5" step="0.01" value="0.16" disabled>
 
     <h2>Form</h2>
     <label>Größe (längste Seite) <output id="sizeOut"></output></label>
@@ -436,7 +434,7 @@ function loop(t) {
 const status = (text, cls) => { const el = $("status"); el.innerHTML = text; el.className = "msg " + (cls || ""); };
 let output = "blueprint";
 const params = (extra = {}) => new URLSearchParams(Object.assign({
-  model: $("model").value, size: $("size").value, drop_base: $("baseOn").checked ? $("base").value : 0,
+  model: $("model").value, size: $("size").value,
   tolerance: $("tolerance").value, spacing: $("spacing").value, finish: $("finish").value, output,
   designer: $("designer").value, cost_per_m: $("cost").value, kps: $("kps").value }, extra));
 
@@ -456,8 +454,6 @@ if (APP) {
     $("sizeOut").textContent = $("size").value + " m";
     $("tolOut").textContent = (+$("tolerance").value).toFixed(2) + " m";
     $("spacingOut").textContent = $("spacing").value + " m";
-    $("baseOut").textContent = $("baseOn").checked ? Math.round($("base").value * 100) + " % der Höhe" : "";
-    $("base").disabled = !$("baseOn").checked;
   };
   labels();
 
@@ -479,8 +475,8 @@ if (APP) {
     } catch (e) { if (my === seq) status("Programm nicht erreichbar – läuft es noch?", "warn"); }
   }
   const later = () => { labels(); clearTimeout(timer); timer = setTimeout(rebuild, 350); };
-  for (const id of ["size", "tolerance", "spacing", "base"]) $(id).addEventListener("input", later);
-  for (const id of ["model", "finish", "baseOn"]) $(id).addEventListener("change", later);
+  for (const id of ["size", "tolerance", "spacing"]) $(id).addEventListener("input", later);
+  for (const id of ["model", "finish"]) $(id).addEventListener("change", later);
   $("kps").addEventListener("input", () => showStats(lastStats));
 
   const setOutput = o => {
@@ -524,7 +520,7 @@ if (APP) {
   // ---- keyboard build: poll the server and show placed beams
   let polling = null;
   const RUNNING = ["ready", "countdown", "running", "paused"];
-  const lockable = ["model", "uploadBtn", "baseOn", "base", "size", "tolerance", "spacing", "finish", "tabBp", "tabKeys",
+  const lockable = ["model", "uploadBtn", "size", "tolerance", "spacing", "finish", "tabBp", "tabKeys",
     "kps", "progress", "startAt", "countdown", "simulate", "runStart", "exportKeys"];
   const setLocked = on => { for (const id of lockable) $(id).disabled = on; $("runPause").disabled = $("runStop").disabled = !on; if (!on) labels(); };
   function showRun(st) {
@@ -568,7 +564,6 @@ if (APP) {
     for (const [id, key] of [["size", "size"], ["tolerance", "tolerance"], ["spacing", "spacing"], ["finish", "finish"], ["kps", "kps"]])
       if (q.get(key) !== null) $(id).value = q.get(key);
     if (q.get("model")) $("model").value = q.get("model");
-    if (+q.get("drop_base")) { $("baseOn").checked = true; $("base").value = q.get("drop_base"); }
     labels(); output = "keys"; $("tabKeys").classList.add("on"); $("tabBp").classList.remove("on");
     show("bp-only", false); show("keys-only", true);
     rebuild().then(() => { showRun(APP.run); poll(); });

@@ -20,7 +20,7 @@ FINISH_CHOICES = ["caterium", "copper", "chrome", "carbonsteel"]
 
 
 def _settings(args: argparse.Namespace, output: str) -> Settings:
-    s = Settings(size=args.size, drop_base=args.drop_base, tolerance=args.tolerance,
+    s = Settings(size=args.size, tolerance=args.tolerance,
                  spacing=args.spacing, finish=args.finish or "", output=output)
     if output == "blueprint":
         s.designer, s.inset, s.cost_per_m = args.designer, args.inset, args.cost_per_m
@@ -91,8 +91,6 @@ def _shape_options(p: argparse.ArgumentParser) -> None:
     p.add_argument("model", help=".stl or .obj model (Z up)")
     p.add_argument("-o", "--output", default="out", help="output folder")
     p.add_argument("--size", type=float, default=40.0, help="largest side of the model in metres (default 40)")
-    p.add_argument("--drop-base", type=float, default=0.0, metavar="FRACTION",
-                   help="remove separate parts in the bottom FRACTION of the height, e.g. 0.16 = pedestal")
     p.add_argument("--tolerance", type=float, default=1.0,
                    help="how far (m) a straightened beam may stray from a curve; lower = more detail")
     p.add_argument("--spacing", type=float, default=1.0, help="distance between beams (1 = closed surface)")

@@ -84,45 +84,6 @@ def save_stl_ascii(path: str | Path, triangles: np.ndarray, name: str = "model")
     Path(path).write_text("\n".join(lines) + "\n")
 
 
-def connected_parts(triangles: np.ndarray) -> np.ndarray:
-    """Part id per triangle: triangles sharing a vertex belong to the same part."""
-    keys = np.round(triangles.reshape(-1, 3), 4)
-    _, vid = np.unique(keys, axis=0, return_inverse=True)
-    vid = vid.reshape(-1, 3)
-    parent = np.arange(vid.max() + 1)
-
-    def find(a: int) -> int:
-        while parent[a] != a:
-            parent[a] = parent[parent[a]]
-            a = parent[a]
-        return a
-
-    for a, b, c in vid:
-        ra = find(a)
-        for v in (b, c):
-            rv = find(v)
-            if rv != ra:
-                parent[rv] = ra
-    return np.array([find(a) for a in vid[:, 0]])
-
-
-def drop_base(triangles: np.ndarray, height_fraction: float) -> np.ndarray:
-    """Remove every separate part that lies completely below `height_fraction` of the model height.
-
-    Typical use: cut a statue off its pedestal (`0.16` = parts entirely in the bottom 16 %).
-    Model Z is up.
-    """
-    z = triangles[..., 2]
-    lo, hi = float(z.min()), float(z.max())
-    cut = lo + height_fraction * (hi - lo)
-    part = connected_parts(triangles)
-    tops = {p: float(z[part == p].max()) for p in np.unique(part)}
-    keep = np.array([tops[p] > cut for p in part])
-    if not keep.any():
-        raise ValueError("drop_base would remove the whole model - use a smaller fraction")
-    return triangles[keep]
-
-
 def fit_to_size(triangles: np.ndarray, size: float) -> np.ndarray:
     """Scale the model so its largest side is `size` metres; min corner moves to the origin."""
     pts = triangles.reshape(-1, 3)
