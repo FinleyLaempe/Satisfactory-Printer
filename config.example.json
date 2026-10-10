@@ -8,13 +8,22 @@
     "-z": "pagedown",
     "lock": "h"
   },
-  "beam_macro": ["key:lock", "nudge:shape", "click", "key:lock", "nudge:place", "click"],
+  "beam_macro": [
+    "key:lock",
+    "nudge:shape",
+    "click",
+    "roll",
+    "key:lock",
+    "nudge:place",
+    "click"
+  ],
   "model_offset": "auto",
   "auto_offset_gap": 2,
   "key_delay": 0.05,
   "key_interval": 0.05,
   "click_delay": 0.25,
   "beam_delay": 0.3,
-  "max_beam_length": 40,
-  "max_nudge": 0
+  "roll": true,
+  "roll_step_deg": 15,
+  "roll_direction": 1
 }

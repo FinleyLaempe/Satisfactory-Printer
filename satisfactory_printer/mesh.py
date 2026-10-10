@@ -121,3 +121,11 @@ def drop_base(triangles: np.ndarray, height_fraction: float) -> np.ndarray:
     if not keep.any():
         raise ValueError("drop_base would remove the whole model - use a smaller fraction")
     return triangles[keep]
+
+
+def fit_to_size(triangles: np.ndarray, size: float) -> np.ndarray:
+    """Scale the model so its largest side is `size` metres; min corner moves to the origin."""
+    pts = triangles.reshape(-1, 3)
+    lo, hi = pts.min(axis=0), pts.max(axis=0)
+    extent = float((hi - lo).max())
+    return (triangles - lo) * (size / extent if extent else 1.0)

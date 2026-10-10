@@ -1,168 +1,202 @@
-"""Live preview: a tiny local web server around the build pipeline.
+"""The app: a small local web server (127.0.0.1 only) around the pipeline.
 
-  python -m satisfactory_printer serve model.stl
+  python -m satisfactory_printer
 
-opens the preview in the browser with sliders (size, mode, tolerance, spacing) and a typing
-speed box. Each change rebuilds the beams here and the page re-renders them; "Save plan"
-writes plan.json etc. for the current settings, and "Start" types the plan into the game
-while the page shows which beams are already placed. Only listens on 127.0.0.1.
+Pick or upload a model, adjust size / pedestal / detail / finish and see the beams live.
+Export blueprints (download as zip) or, as a fallback, type the beams into the game with
+the keyboard while the page shows which beams are already placed.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import re
 import threading
 import webbrowser
+import zipfile
 from collections import OrderedDict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote, urlparse
 
-from .mesh import load_mesh
-from .plan import keystrokes_per_second, load_config, plan_to_json
+from . import pipeline
+from .pipeline import Settings
 
-LIVE_PARAMS = ("size", "mode", "tolerance", "spacing", "pattern")  # change the beams -> cache key
-RUN_PARAMS = ("kps", "start_at", "countdown", "simulate")  # only change how it's typed
+EXAMPLES = Path(__file__).resolve().parent.parent / "examples"
+MODEL_SUFFIXES = (".stl", ".obj")
+MAX_UPLOAD = 300 * 1024 * 1024
 
 
-class LiveSession:
-    """Holds the loaded model and a small cache of recent builds."""
+def _num(q: dict, key: str, default: float, lo: float, hi: float) -> float:
+    try:
+        return min(max(float(q[key][0]), lo), hi) if key in q and q[key] else default
+    except ValueError:
+        return default
 
-    def __init__(self, args: argparse.Namespace):
-        from . import cli
 
-        self.cli = cli
-        self.base = args
-        self.src = Path(args.input)
-        self.raw = self.cli.load_model(self.src, args)
-        self.out = Path(args.output)
+class App:
+    def __init__(self, models: Path, out: Path):
+        self.models_dir = models
+        self.out = out
+        self.models_dir.mkdir(parents=True, exist_ok=True)
         self.lock = threading.Lock()
         self.cache: OrderedDict[tuple, tuple] = OrderedDict()
         self.runner = None
         self.run_params: dict | None = None
 
-    def params(self, query: dict[str, list[str]] | None = None) -> dict:
-        p = {
-            "size": float(self.base.size or 20),
-            "mode": self.base.mode,
-            "tolerance": float(self.base.tolerance),
-            "spacing": float(self.base.spacing),
-            "pattern": self.base.pattern,
-            "kps": float(self.base.kps or keystrokes_per_second(load_config(self.base.config))),
-            "start_at": 0,
-            "countdown": 5,
-            "simulate": False,
-        }
-        for k, v in (query or {}).items():
-            if not v or k not in LIVE_PARAMS + RUN_PARAMS:
-                continue
-            if k in ("mode", "pattern"):
-                p[k] = v[0]
-            elif k == "simulate":
-                p[k] = v[0].lower() in ("1", "true", "on", "yes")
-            elif k in ("start_at", "countdown"):
-                p[k] = max(int(float(v[0])), 0)
-            else:
-                p[k] = float(v[0])
-        p["kps"] = min(max(p["kps"], 0.5), 100.0)
-        if p["mode"] not in self.cli.MODES:
-            raise ValueError(f"unknown mode {p['mode']!r}")
-        if p["pattern"] not in ("flow", "rings"):
-            raise ValueError(f"unknown pattern {p['pattern']!r}")
-        p["size"] = min(max(p["size"], 1.0), 500.0)
-        p["tolerance"] = min(max(p["tolerance"], 0.05), 10.0)
-        p["spacing"] = min(max(p["spacing"], 1.0), 20.0)
+    # ---- models
+    def models(self) -> list[dict]:
+        found = []
+        for folder, label in ((self.models_dir, "Meine Modelle"), (EXAMPLES, "Beispiele")):
+            if folder.is_dir():
+                for f in sorted(folder.iterdir()):
+                    if f.suffix.lower() in MODEL_SUFFIXES:
+                        found.append({"id": f"{label}/{f.name}", "name": f.stem, "group": label})
+        return found
+
+    def model_path(self, model_id: str) -> Path:
+        label, _, fname = model_id.partition("/")
+        folder = {"Meine Modelle": self.models_dir, "Beispiele": EXAMPLES}.get(label)
+        if folder is None or "/" in fname or "\\" in fname:
+            raise ValueError("unknown model")
+        p = folder / fname
+        if not p.is_file():
+            raise ValueError(f"model not found: {fname}")
         return p
 
-    def _args(self, p: dict) -> argparse.Namespace:
-        args = argparse.Namespace(**vars(self.base))
-        args.size, args.scale = p["size"], None
-        args.mode = p["mode"]
-        args.tolerance = p["tolerance"]
-        args.pattern = p["pattern"]
-        # one "spacing" slider drives both flat-area and contour spacing
-        args.spacing = args.ring_spacing = p["spacing"]
-        return args
+    def upload(self, filename: str, data: bytes) -> dict:
+        name = re.sub(r"[^A-Za-z0-9_.\- ]", "_", Path(filename).name).strip() or "model.stl"
+        if Path(name).suffix.lower() not in MODEL_SUFFIXES:
+            raise ValueError("nur .stl oder .obj")
+        (self.models_dir / name).write_bytes(data)
+        return {"id": f"Meine Modelle/{name}", "models": self.models()}
 
-    def build(self, p: dict):
-        key = tuple(p[k] for k in LIVE_PARAMS)
+    # ---- settings from the query string
+    def params(self, q: dict) -> tuple[str, Settings, dict]:
+        models = self.models()
+        model = q.get("model", [models[0]["id"] if models else ""])[0]
+        s = Settings(
+            size=_num(q, "size", 40, 3, 300),
+            drop_base=_num(q, "drop_base", 0, 0, 0.9),
+            tolerance=_num(q, "tolerance", 1.0, 0.1, 5),
+            spacing=_num(q, "spacing", 1.0, 1, 5),
+            finish=q.get("finish", [""])[0] if q.get("finish", [""])[0] in pipeline.FINISH_COLORS else "",
+            output="keys" if q.get("output", ["blueprint"])[0] == "keys" else "blueprint",
+            designer=q.get("designer", ["auto"])[0] or "auto",
+            cost_per_m=_num(q, "cost_per_m", 0.25, 0, 100),
+            kps=_num(q, "kps", 10, 0.5, 100),
+        )
+        run = {
+            "start_at": int(_num(q, "start_at", 0, 0, 10**7)),
+            "countdown": int(_num(q, "countdown", 5, 0, 120)),
+            "simulate": q.get("simulate", ["0"])[0].lower() in ("1", "true", "on", "yes"),
+            "name": re.sub(r"[^A-Za-z0-9_\-]", "_", q.get("name", [""])[0])[:60],
+        }
+        return model, s, run
+
+    # ---- building (cached by model + shape settings)
+    def build(self, model: str, s: Settings):
+        key = (model, s.shape_key())
         with self.lock:
             if key in self.cache:
                 self.cache.move_to_end(key)
-                return self.cache[key]
-            res = self.cli.run_build(self.raw, self._args(p), self.src.name)
-            entry = (res, self.cli.summary_stats(res), {})
+                res, st, acc = self.cache[key]
+                res.settings = s  # finish / designer / cost etc. don't change the beams
+                return res, pipeline.stats(res), acc
+            path = self.model_path(model)
+            res = pipeline.build(path, s, path.stem)
+            entry = (res, pipeline.stats(res), {})
             self.cache[key] = entry
-            while len(self.cache) > 12:
+            while len(self.cache) > 8:
                 self.cache.popitem(last=False)
             return entry
 
-    def preview(self, p: dict) -> dict:
-        res, stats, metrics = self.build(p)
-        return self.cli.preview_data(res, {**stats, **metrics})
+    def preview(self, model: str, s: Settings) -> dict:
+        res, st, acc = self.build(model, s)
+        return pipeline.preview_data(res, {**st, **acc})
 
-    def metrics(self, p: dict) -> dict:
-        res, _, metrics = self.build(p)
-        if not metrics and res.beams:
-            metrics.update(self.cli.metric_stats(res))  # cached in place
-        return metrics
+    def accuracy(self, model: str, s: Settings) -> dict:
+        res, _, acc = self.build(model, s)
+        if not acc and res.beams:
+            acc.update(pipeline.accuracy(res))
+        return acc
 
-    def save(self, p: dict) -> dict:
-        res, _, _ = self.build(p)
+    # ---- exports
+    def export(self, model: str, s: Settings, run: dict) -> dict:
+        res, _, _ = self.build(model, s)
         if not res.beams:
-            return {"error": "no beams to save"}
-        res = self.cli.with_speed(res, p["kps"])
-        metrics = self.metrics(p)
-        folder = self.out / f"{self.src.stem}_{p['mode']}_{p['size']:g}m"
-        self.cli.write_outputs(res, folder, {**self.cli.summary_stats(res), **metrics})
-        return {"folder": str(folder), "plan": str(folder / "plan.json")}
+            return {"error": "keine Träger"}
+        name = run["name"] or re.sub(r"[^A-Za-z0-9_\-]", "_", f"{res.name}_{s.size:g}m")
+        folder = self.out / name
+        if s.output == "blueprint":
+            from .blueprint import check_node
 
-    # ---- typing the plan into the game
-    def _busy(self) -> bool:
+            problem = check_node()
+            if problem:
+                return {"error": problem}
+            info = pipeline.export_blueprints(res, folder, name)
+        else:
+            info = pipeline.export_keys(res, folder, s.kps)
+        zpath = self.out / f"{name}.zip"
+        with zipfile.ZipFile(zpath, "w", zipfile.ZIP_DEFLATED) as z:
+            for f in sorted(folder.iterdir()):
+                z.write(f, f.name)
+        return {"folder": str(folder), "download": f"/api/download?file={quote(zpath.name)}",
+                "guide": info.get("guide", "")}
+
+    def download(self, fname: str) -> Path:
+        p = (self.out / Path(fname).name).resolve()
+        if p.parent != self.out.resolve() or p.suffix != ".zip" or not p.is_file():
+            raise ValueError("not found")
+        return p
+
+    # ---- typing a keyboard plan into the game
+    def busy(self) -> bool:
         return self.runner is not None and self.runner.status in ("ready", "countdown", "running", "paused")
 
-    def run_start(self, p: dict) -> dict:
+    def run_start(self, model: str, s: Settings, run: dict, query: str) -> dict:
         from .executor import PlanRunner
+        from .plan import apply_speed, plan_to_json
 
-        if self._busy():
-            return {"error": "a build is already running"}
-        saved = self.save(p)  # keep plan.json on disk so `run --start-at` can resume later
-        if "error" in saved:
-            return saved
-        res, _, _ = self.build(p)
-        res = self.cli.with_speed(res, p["kps"])
-        plan = plan_to_json(res.steps, res.offset, res.cfg)
-        self.runner = PlanRunner(plan, p["start_at"], p["countdown"], simulate=p["simulate"])
-        self.run_params = {k: p[k] for k in LIVE_PARAMS + RUN_PARAMS}
+        if s.output != "keys":
+            return {"error": "Tastatur-Ausgabe wählen"}
+        if self.busy():
+            return {"error": "es läuft schon ein Bau"}
+        self.export(model, s, run)  # plan.json on disk, so `run --start-at` can resume later
+        res, _, _ = self.build(model, s)
+        plan = plan_to_json(res.steps, res.offset, apply_speed(res.cfg, s.kps))
+        self.runner = PlanRunner(plan, run["start_at"], run["countdown"], simulate=run["simulate"])
+        self.run_params = {"query": query}
         self.runner.start_thread()
         return self.run_status()
 
     def run_status(self) -> dict:
         if self.runner is None:
             return {"status": "idle"}
-        return {**self.runner.state(), "params": self.run_params}
+        return {**self.runner.state(), **(self.run_params or {})}
 
     def run_control(self, action: str) -> dict:
-        if self.runner is None:
-            return {"status": "idle"}
-        {"pause": self.runner.pause, "resume": self.runner.resume, "stop": self.runner.stop,
-         "abort": self.runner.abort}[action]()
+        if self.runner is not None:
+            {"pause": self.runner.pause, "resume": self.runner.resume, "stop": self.runner.stop,
+             "abort": self.runner.abort}[action]()
         return self.run_status()
 
 
-def make_handler(session: LiveSession):
-    from .preview_html import render_page
+def make_handler(app: App):
+    from .preview_html import render_app
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, fmt, *args):  # keep the terminal quiet
             pass
 
-        def _send(self, code: int, body: bytes, ctype: str) -> None:
+        def _send(self, code: int, body: bytes, ctype: str, extra: dict | None = None) -> None:
             self.send_response(code)
             self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Cache-Control", "no-store")
+            for k, v in (extra or {}).items():
+                self.send_header(k, v)
             self.end_headers()
             self.wfile.write(body)
 
@@ -171,25 +205,38 @@ def make_handler(session: LiveSession):
 
         def _handle(self, method: str) -> None:
             url = urlparse(self.path)
+            q = parse_qs(url.query)
             try:
-                p = session.params(parse_qs(url.query))
                 if method == "GET" and url.path in ("/", "/index.html"):
-                    if session._busy() and session.run_params:
-                        p = {**p, **session.run_params}  # show the beams that are being built
-                    live = {"params": p, "modes": session.cli.MODES, "run": session.run_status()}
-                    self._send(200, render_page(session.preview(p), live).encode(), "text/html; charset=utf-8")
+                    self._send(200, render_app({"models": app.models(), "run": app.run_status()}).encode(),
+                               "text/html; charset=utf-8")
+                elif method == "GET" and url.path == "/api/models":
+                    self._json({"models": app.models()})
+                elif method == "POST" and url.path == "/api/upload":
+                    size = int(self.headers.get("Content-Length", 0))
+                    if size <= 0 or size > MAX_UPLOAD:
+                        raise ValueError("Datei leer oder zu groß")
+                    self._json(app.upload(q.get("name", ["model.stl"])[0], self.rfile.read(size)))
                 elif method == "GET" and url.path == "/api/build":
-                    self._json(session.preview(p))
-                elif method == "GET" and url.path == "/api/metrics":
-                    self._json(session.metrics(p))
-                elif method == "POST" and url.path == "/api/save":
-                    self._json(session.save(p))
+                    model, s, _ = app.params(q)
+                    self._json(app.preview(model, s))
+                elif method == "GET" and url.path == "/api/accuracy":
+                    model, s, _ = app.params(q)
+                    self._json(app.accuracy(model, s))
+                elif method == "POST" and url.path == "/api/export":
+                    model, s, run = app.params(q)
+                    self._json(app.export(model, s, run))
+                elif method == "GET" and url.path == "/api/download":
+                    p = app.download(q.get("file", [""])[0])
+                    self._send(200, p.read_bytes(), "application/zip",
+                               {"Content-Disposition": f'attachment; filename="{p.name}"'})
                 elif method == "POST" and url.path == "/api/run/start":
-                    self._json(session.run_start(p))
+                    model, s, run = app.params(q)
+                    self._json(app.run_start(model, s, run, url.query))
                 elif method == "GET" and url.path == "/api/run/status":
-                    self._json(session.run_status())
-                elif method == "POST" and url.path in ("/api/run/pause", "/api/run/resume", "/api/run/stop", "/api/run/abort"):
-                    self._json(session.run_control(url.path.rsplit("/", 1)[1]))
+                    self._json(app.run_status())
+                elif method == "POST" and url.path in ("/api/run/pause", "/api/run/resume", "/api/run/stop"):
+                    self._json(app.run_control(url.path.rsplit("/", 1)[1]))
                 else:
                     self._json({"error": "not found"}, 404)
             except Exception as e:  # report to the page instead of dropping the connection
@@ -205,17 +252,17 @@ def make_handler(session: LiveSession):
 
 
 def serve(args: argparse.Namespace) -> int:
-    session = LiveSession(args)
-    httpd = ThreadingHTTPServer(("127.0.0.1", args.port), make_handler(session))
+    app = App(Path(args.models), Path(args.output))
+    httpd = ThreadingHTTPServer(("127.0.0.1", args.port), make_handler(app))
     url = f"http://127.0.0.1:{httpd.server_address[1]}/"
-    print(f"Live preview for {session.src.name}: {url}")
-    print(f"'Save plan' writes to {session.out}/<model>_<mode>_<size>m/.  Ctrl+C to stop.")
+    print(f"Satisfactory Printer läuft: {url}   (Strg+C beendet)")
+    print(f"Modelle: {app.models_dir}/   Exporte: {app.out}/")
     if not args.no_browser:
         threading.Timer(0.5, webbrowser.open, (url,)).start()
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
-        print("\nstopped")
+        print("\nbeendet")
     finally:
         httpd.server_close()
     return 0

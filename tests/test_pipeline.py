@@ -1,103 +1,52 @@
 import json
 import sys
+import time
+import zipfile
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "examples"))
 
-from make_examples import cube, house, ramp, save_stl_ascii, sphere  # noqa: E402
+from make_examples import cube, house, ramp, rocket, save_stl_ascii, sphere  # noqa: E402
+from satisfactory_printer import blueprint as bpmod  # noqa: E402
 from satisfactory_printer import surfaces  # noqa: E402
-from satisfactory_printer.beams import (  # noqa: E402
-    Beam,
-    beams_from_segments_lattice,
-    beams_from_voxels,
-    lattice_walk,
-    merge_collinear,
-    simplify_polyline,
-    split_segment,
-)
+from satisfactory_printer.beams import Beam, merge_collinear, set_precise, simplify_polyline, split_segment  # noqa: E402
 from satisfactory_printer.cli import main  # noqa: E402
-from satisfactory_printer.metrics import evaluate  # noqa: E402
+from satisfactory_printer.mesh import drop_base, fit_to_size  # noqa: E402
+from satisfactory_printer.metrics import evaluate, fill_gaps  # noqa: E402
+from satisfactory_printer.pipeline import Settings, build, export_blueprints, preview_data, stats  # noqa: E402
 from satisfactory_printer.plan import DEFAULT_CONFIG, build_plan  # noqa: E402
-from satisfactory_printer.voxelize import hollow, scale_to_grid, voxelize_solid  # noqa: E402
+
+needs_node = pytest.mark.skipif(bool(bpmod.check_node()), reason="node / blueprint writer not installed")
 
 
-def _lattice_points(b: Beam):
-    v = np.array(b.vector)
-    n = int(np.abs(v).max())
-    return {tuple(np.array(b.start) + v // n * k) for k in range(n + 1)}
+def _rot(q, v):
+    x, y, z, w = q
+    u = np.array([x, y, z])
+    return v + 2 * w * np.cross(u, v) + 2 * np.cross(u, np.cross(u, v))
 
 
-# --------------------------------------------------------------------------- voxels
+# --------------------------------------------------------------------------- model
 
 
-def test_cube_voxelizes_solid():
-    grid = voxelize_solid(scale_to_grid(cube(), size=4))
-    assert grid.shape == (4, 4, 4) and grid.all()
+def test_fit_to_size():
+    t = fit_to_size(cube(1.0) * np.array([2, 4, 1]) + 5, 20)
+    pts = t.reshape(-1, 3)
+    assert np.allclose(pts.min(axis=0), 0) and np.isclose(pts.max(), 20)
 
 
-def test_hollow_removes_interior():
-    grid = np.ones((5, 5, 5), dtype=bool)
-    assert hollow(grid).sum() == 5**3 - 3**3
+def test_drop_base_removes_only_the_pedestal():
+    pedestal = cube(1.0) * np.array([20, 20, 2])  # wide flat block at the bottom
+    column = cube(1.0) * np.array([2, 2, 30]) + np.array([9, 9, 2])  # separate part on top
+    kept = drop_base(np.vstack([pedestal, column]), 0.16)
+    assert len(kept) == len(column) and kept[..., 2].min() >= 2
 
 
-def test_voxel_beams_cover_every_voxel_and_stay_inside():
-    rng = np.random.default_rng(0)
-    grid = rng.random((9, 8, 7)) > 0.4
-    filled = {tuple(p) for p in np.argwhere(grid)}
-    beams = beams_from_voxels(grid, max_len=5)
-    covered = set()
-    for b in beams:
-        assert 1 <= b.length <= 5 + 1e-9
-        assert max(abs(c) for c in b.vector) == min(abs(c) for c in b.vector if c)  # cube direction
-        pts = _lattice_points(b)
-        covered |= pts
-        if len(pts & filled) > 1:  # (isolated voxels get a 1 m stub into empty space)
-            assert pts <= filled
-    assert filled <= covered
-
-
-def test_voxel_mixes_axes_and_uses_long_beams():
-    grid = np.zeros((30, 30, 30), dtype=bool)
-    grid[:, 0, 0] = True  # 30 m along x
-    grid[0, :, 5] = True  # 30 m along y
-    grid[5, 5, :] = True  # 30 m along z
-    beams = beams_from_voxels(grid, max_len=40, directions="6")
-    assert len(beams) == 3
-    assert sorted(b.length for b in beams) == [29, 29, 29]
-
-
-def test_voxel_diagonal_staircase_becomes_one_beam():
-    grid = np.zeros((10, 3, 10), dtype=bool)
-    for i in range(10):
-        grid[i, 1, i] = True  # a 45° slope, one voxel thick
-    beams = beams_from_voxels(grid, max_len=40)
-    assert len(beams) == 1 and beams[0].vector in ((9, 0, 9), (-9, 0, -9))
-
-
-# --------------------------------------------------------------------------- helpers
-
-
-def test_lattice_walk_is_26_connected():
-    pts = lattice_walk(np.array([0.5, 0.5, 0.5]), np.array([17.3, -6.5, 9.5]))
-    for p, q in zip(pts, pts[1:]):
-        assert max(abs(a - b) for a, b in zip(p, q)) == 1
-
-
-def test_lattice_beams_only_use_cube_directions():
-    segs = [
-        (np.array([0, 0, 0]), np.array([50, 0, 0])),  # longer than max_len
-        (np.array([0, 0, 0]), np.array([5, 5, 5])),
-        (np.array([0, 0, 0]), np.array([7, 3, 1])),
-    ]
-    beams = beams_from_segments_lattice(segs, max_len=40)
-    for b in beams:
-        v = np.abs(np.array(b.vector))
-        assert set(np.unique(v)) <= {0, v.max()} and b.length <= 40 + 1e-9
-    assert Beam((0, 0, 0), (5, 5, 5)) in beams
+# --------------------------------------------------------------------------- beam helpers
 
 
 def test_split_respects_max_length():
@@ -117,158 +66,101 @@ def test_simplify_keeps_corners_and_drops_noise():
 def test_merge_collinear_fuses_overlaps_and_respects_max_len():
     beams = [Beam((0, 0, 0), (10, 0, 0)), Beam((5, 0, 0), (20, 0, 0)), Beam((20, 0, 0), (0, 0, 0)),
              Beam((0, 0, 0), (2, 2, 0)), Beam((2, 2, 0), (6, 6, 0)), Beam((0, 1, 0), (5, 1, 0))]
-    merged = merge_collinear(beams, max_len=40)
-    vecs = sorted(tuple(abs(c) for c in b.vector) for b in merged)
+    vecs = sorted(tuple(abs(c) for c in b.vector) for b in merge_collinear(beams, max_len=40))
     assert vecs == [(5, 0, 0), (6, 6, 0), (20, 0, 0)]
-    long = merge_collinear([Beam((0, 0, 0), (30, 0, 0)), Beam((30, 0, 0), (60, 0, 0))], max_len=40)
-    assert len(long) == 2
+    assert len(merge_collinear([Beam((0, 0, 0), (30, 0, 0)), Beam((30, 0, 0), (60, 0, 0))], 40)) == 2
+
+
+def test_precise_mode_keeps_exact_points():
+    set_precise(True)
+    try:
+        (b,) = split_segment(np.array([0.25, 0, 0]), np.array([10.6, 0.3, 0]), 40)
+    finally:
+        set_precise(False)
+    assert b.start == (0.25, 0.0, 0.0) and b.end == (10.6, 0.3, 0.0)
 
 
 # --------------------------------------------------------------------------- surfaces
 
 
 def test_planar_regions_of_house():
-    topo = surfaces.build_topology(scale_to_grid(house(), size=20))
+    topo = surfaces.build_topology(fit_to_size(house(), 20))
     regions, curved = surfaces.find_planar_regions(topo)
-    assert len(regions) == 7  # 4 walls + floor + 2 roof planes (gables merge with end walls)
-    assert not curved.any()
+    assert len(regions) == 7 and not curved.any()  # 4 walls + floor + 2 roof planes
 
 
 def test_sloped_plane_gets_diagonal_beams():
-    """The ramp's 30° slope must be built from beams running down the slope, not a staircase."""
-    tris = scale_to_grid(ramp(), size=20)
-    topo = surfaces.build_topology(tris)
+    """The ramp's 30° slope is built from beams running down the slope, not a staircase."""
+    topo = surfaces.build_topology(fit_to_size(ramp(), 20))
     regions, _ = surfaces.find_planar_regions(topo)
     slope = next(r for r in regions if 0.1 < abs(r.normal[2]) < 0.95)
     beams = surfaces.hatch_region(topo, slope, 1.0, 40)
-    assert beams and all(b.vector[0] != 0 and b.vector[2] != 0 for b in beams)  # rise along x and z
+    assert beams and all(b.vector[0] != 0 and b.vector[2] != 0 for b in beams)
     assert max(b.length for b in beams) > 15
 
 
-def test_hybrid_house_is_accurate():
-    tris = scale_to_grid(house(), size=20)
-    beams = merge_collinear(surfaces.beams_hybrid(surfaces.build_topology(tris)))
+def test_house_is_accurate_with_edges():
+    tris = fit_to_size(house(), 20)
+    beams = merge_collinear(surfaces.beams_from_surface(surfaces.build_topology(tris)))
     m = evaluate(beams, tris)
     assert m["coverage_pct"] > 97 and m["mean_dev_m"] < 0.4 and m["stray_pct"] < 1
     assert any(b.kind == "edge" for b in beams)
 
 
-def test_contour_sphere_is_closed_surface():
-    from satisfactory_printer.metrics import fill_gaps
+def test_rocket_body_gets_vertical_staves():
+    tris = fit_to_size(rocket(), 30)
+    beams = surfaces.beams_from_contours(tris)
+    long = [b for b in beams if b.length >= 3]
+    assert long and sum(abs(b.vector[2]) / b.length > 0.7 for b in long) > 0.6 * len(long)
 
-    tris = scale_to_grid(sphere(), size=16)
-    rings = surfaces.beams_from_contours(tris, pattern="rings")
-    assert {b.kind for b in rings} <= {"ring", "arc"}
-    staves = surfaces.beams_from_contours(tris, pattern="flow")
-    assert any(b.kind == "stave" for b in staves)
-    closed = fill_gaps(staves, tris)
-    m = evaluate(closed, tris)
+
+def test_sphere_is_closed_after_gap_filling():
+    tris = fit_to_size(sphere(), 16)
+    beams = fill_gaps(surfaces.beams_from_contours(tris), tris)
+    m = evaluate(beams, tris)
     assert m["coverage_pct"] >= 99.5 and m["stray_pct"] < 2
 
 
-def test_rocket_body_gets_vertical_staves():
-    """A tall revolved body: staves should run up the body, not around it."""
-    from make_examples import rocket
-
-    tris = scale_to_grid(rocket(), size=30)
-    beams = surfaces.beams_from_contours(tris, pattern="flow")
-    long = [b for b in beams if b.length >= 3]
-    vertical = [b for b in long if abs(b.vector[2]) / b.length > 0.7]
-    assert len(vertical) > 0.6 * len(long)
-
-
-def test_roll_puts_a_face_on_the_surface():
-    from satisfactory_printer.orient import roll_steps
-
-    # horizontal beam along x lying on a 30°-tilted roof (normal rotated about x)
-    ang = np.radians(30)
-    n = np.array([0, -np.sin(ang), np.cos(ang)])
-    tri = np.array([[[-50, 0, 0], [50, 0, 0], [0, 10 * np.cos(ang), 10 * np.sin(ang)]]])
-    assert np.allclose(np.cross(tri[0, 1] - tri[0, 0], tri[0, 2] - tri[0, 0]) / np.linalg.norm(
-        np.cross(tri[0, 1] - tri[0, 0], tri[0, 2] - tri[0, 0])), n)
-    (steps,) = roll_steps([Beam((0, 2, 1), (10, 2, 1))], tri)
-    assert abs(steps) == 2  # 30° = 2 notches of 15°
-    (flat,) = roll_steps([Beam((0, 0, 0), (10, 0, 0))], np.array([[[-50, -50, 0], [50, -50, 0], [0, 50, 0]]]))
-    assert flat == 0
-
-
-def test_wireframe_cube_has_12_edges():
-    topo = surfaces.build_topology(scale_to_grid(cube(), size=5))
-    beams = surfaces.beams_from_mesh_edges(topo)
-    assert len(beams) == 12 and all(b.length == 5 for b in beams)
-
-
-# --------------------------------------------------------------------------- plan / cli
+# --------------------------------------------------------------------------- keyboard plan + roll
 
 
 def test_plan_nudges_reproduce_beam():
-    """Simulate the technique: shape nudge relative to anchor, then place nudge."""
     cfg = dict(DEFAULT_CONFIG, model_offset=[0, 0, 0])
     beam = Beam((2, 3, 1), (5, -1, 4))
-    (step,), _, _ = build_plan([beam], cfg)
+    (step,), _ = build_plan([beam], cfg)
     inverse = {v: k for k, v in cfg["keys"].items()}
     pos, vectors = np.zeros(3, int), []
     for a in step.actions:
         if a.kind == "key" and a.key in inverse and inverse[a.key] != "lock":
-            sign = 1 if inverse[a.key][0] == "+" else -1
-            pos["xyz".index(inverse[a.key][1])] += sign * a.times
+            pos["xyz".index(inverse[a.key][1])] += (1 if inverse[a.key][0] == "+" else -1) * a.times
         elif a.kind == "click":
             vectors.append(pos.copy())
             pos[:] = 0
     shape, place = vectors
-    # beam drawn from (anchor + shape) to anchor, then moved by place. The plan may draw it
-    # from either end (the one nearer the anchor is placed last) - same beam either way.
+    # drawn from (anchor + shape) to the anchor, then moved by place; either end may go last
     assert {tuple(shape + place), tuple(place)} == {beam.start, beam.end}
-    assert sum(map(abs, place)) <= sum(map(abs, shape + place))
 
 
-def test_cli_all_modes(tmp_path):
-    stl = tmp_path / "h.stl"
-    save_stl_ascii(stl, house())
-    for mode in ("hybrid", "planes", "contour", "voxel", "wireframe"):
-        out = tmp_path / mode
-        assert main(["build", str(stl), "--size", "12", "--mode", mode, "-o", str(out)]) == 0
-        plan = json.loads((out / "plan.json").read_text())
-        assert plan["beams"] and all(b["length"] <= 40 for b in plan["beams"])
-        html = (out / "preview.html").read_text()
-        assert "let DATA = {" in html and "__DATA__" not in html
+def test_planned_wheel_notches_turn_a_face_onto_the_surface():
+    """Wheel up = counter-clockwise from the tip about start->end, 15° per notch."""
+    from satisfactory_printer.orient import reference_face, roll_steps
 
-
-# --------------------------------------------------------------------------- live preview / runner
-
-
-def test_live_session_rebuilds_and_runs(tmp_path):
-    import time
-
-    from satisfactory_printer.cli import _build_parser
-    from satisfactory_printer.server import LiveSession
-
-    stl = tmp_path / "h.stl"
-    save_stl_ascii(stl, house())
-    cfg = tmp_path / "fast.json"
-    cfg.write_text(json.dumps({"click_delay": 0, "beam_delay": 0}))
-    args = _build_parser().parse_args(["serve", str(stl), "--size", "10", "-o", str(tmp_path / "live"), "-c", str(cfg)])
-    session = LiveSession(args)
-    small = session.preview(session.params({"size": ["10"]}))
-    big = session.preview(session.params({"size": ["30"]}))
-    assert len(big["beams"]) > len(small["beams"]) and big["timing"]["presses"] > 0
-    assert "surface coverage" in session.metrics(session.params({"size": ["10"]}))
-
-    st = session.run_start(session.params({"size": ["10"], "kps": ["100"], "countdown": ["0"],
-                                           "simulate": ["1"], "start_at": ["2"]}))
-    assert st["status"] in ("ready", "countdown", "running") and st["total"] == len(small["beams"])
-    assert session.run_start(session.params({}))["error"]  # only one run at a time
-    deadline = time.time() + 30
-    while session.run_status()["status"] not in ("done", "error") and time.time() < deadline:
-        time.sleep(0.05)
-    final = session.run_status()
-    assert final["status"] == "done" and final["placed"] == final["total"]
-    assert (tmp_path / "live" / "h_hybrid_10m" / "plan.json").exists()
+    ang = np.radians(30)
+    normal = np.array([0, -np.sin(ang), np.cos(ang)])
+    tri = np.array([[[-80, 0, 0], [80, 0, 0], [0, 10 * np.cos(ang), 10 * np.sin(ang)]]], float)
+    beams = [Beam((0, 2, 1), (10, 2, 1)), Beam((10, 2, 1), (0, 2, 1))]
+    steps, _ = build_plan(beams, dict(DEFAULT_CONFIG, model_offset=[30, 5, 0]), roll_steps(beams, tri))
+    for st in steps:
+        notches = sum(a.times for a in st.actions if a.kind == "scroll")
+        axis = np.subtract(st.beam.end, st.beam.start).astype(float)
+        axis /= np.linalg.norm(axis)
+        r, a = reference_face(axis), np.radians(15 * notches)
+        face = r * np.cos(a) + np.cross(axis, r) * np.sin(a) + axis * (axis @ r) * (1 - np.cos(a))
+        c = abs(face @ normal)
+        assert c > 0.99 or c < 0.01
 
 
 def test_runner_pause_and_stop_between_beams():
-    import time
-
     from satisfactory_printer.executor import PlanRunner
 
     beam = {"actions": [{"key": "h", "times": 1}, {"wait": 0.05}]}
@@ -287,33 +179,104 @@ def test_runner_pause_and_stop_between_beams():
     assert r.status == "stopped" and 0 < r.index < 200
 
 
-def test_planned_wheel_notches_turn_a_face_onto_the_surface():
-    """Simulate the game: wheel up = positive (counter-clockwise from the tip) turn about the
-    drawn start->end axis, starting from the reference face. The resulting face must lie
-    flat on a 30° roof - also for beams the plan draws reversed."""
-    from satisfactory_printer.orient import reference_face, roll_steps
+# --------------------------------------------------------------------------- blueprint
 
-    ang = np.radians(30)
-    normal = np.array([0, -np.sin(ang), np.cos(ang)])
-    tri = np.array([[[-80, -80, 0], [80, -80, 0], [0, 10 * np.cos(ang), 10 * np.sin(ang)]]], float)
-    tri[0, :2, 1] = 0
-    tri[0, :2, 2] = 0
-    beams = [Beam((0, 2, 1), (10, 2, 1)), Beam((10, 2, 1), (0, 2, 1))]  # same beam, both ways
-    rolls = roll_steps(beams, tri)
-    cfg = dict(DEFAULT_CONFIG, model_offset=[30, 5, 0])  # far from the anchor
-    steps, _, _ = build_plan(beams, cfg, rolls)
 
-    def rotate(v, axis, deg):
-        a = np.radians(deg)
-        return v * np.cos(a) + np.cross(axis, v) * np.sin(a) + axis * (axis @ v) * (1 - np.cos(a))
+def test_quaternion_puts_local_x_on_the_beam_and_z_on_the_surface():
+    rng = np.random.default_rng(5)
+    for _ in range(50):
+        d, n = rng.normal(size=3), rng.normal(size=3)
+        q = bpmod.quat_from_axes(d, n)
+        assert abs(np.linalg.norm(q) - 1) < 1e-9
+        assert np.allclose(_rot(q, np.array([1.0, 0, 0])), d / np.linalg.norm(d), atol=1e-9)
+        n_perp = n - (n @ d) * d / (d @ d)
+        assert np.allclose(_rot(q, np.array([0, 0, 1.0])), n_perp / np.linalg.norm(n_perp), atol=1e-9)
 
-    for st in steps:
-        notches = sum(a.times for a in st.actions if a.kind == "scroll")
-        axis = np.subtract(st.beam.end, st.beam.start).astype(float)
-        axis /= np.linalg.norm(axis)
-        face = rotate(reference_face(axis), axis, 15 * notches)
-        c = abs(face @ normal)
-        assert c > 0.99 or c < 0.01  # one face (or its neighbour at 90°) lies on the roof
+
+def test_real_save_beam_convention():
+    """A vertical beam from a real save maps local X to +Z."""
+    q = bpmod.quat_from_axes(np.array([0, 0, 1.0]), np.array([1.0, 0, 0]))
+    assert np.allclose(_rot(q, np.array([1.0, 0, 0])), [0, 0, 1])
+
+
+def test_tiles_split_beams_at_borders_and_auto_size():
+    beams = [Beam((0.0, 0.0, 1.0), (100.0, 0.0, 1.0)), Beam((1.0, 1.0, 0.0), (1.0, 1.0, 10.0))]
+    normals = np.array([[0, 0, 1.0], [1.0, 0, 0]])
+    total = 0.0
+    for t in bpmod.make_tiles(beams, normals, designer=(6, 6, 6), inset=0):
+        for s, e, _ in t.beams:
+            for p in (s - t.origin, e - t.origin):  # inside the designer box (origin: floor centre)
+                assert -24 - 1e-6 <= p[0] <= 24 + 1e-6 and -24 - 1e-6 <= p[1] <= 24 + 1e-6
+                assert -1e-6 <= p[2] <= 48 + 1e-6
+            total += np.linalg.norm(e - s)
+    assert abs(total - 110) < 1e-6
+    assert bpmod.parse_designer("11x11x15") == (11, 11, 15)
+    d = bpmod.auto_designer(beams, normals, inset=0)
+    assert d == (13, 1, 2) and len(bpmod.make_tiles(beams, normals, d, inset=0)) == 1
+
+
+# --------------------------------------------------------------------------- pipeline / cli / app
+
+
+def test_pipeline_outputs(tmp_path):
+    stl = tmp_path / "rocket.stl"
+    save_stl_ascii(stl, rocket())
+    bp = build(stl, Settings(size=20, finish="caterium"))
+    keys = build(stl, Settings(size=20, output="keys"))
+    assert bp.beams and bp.normals is not None and keys.steps
+    assert any(not float(c).is_integer() for b in bp.beams for c in b.start)  # exact
+    assert all(float(c).is_integer() for b in keys.beams for c in b.start)  # 1 m grid
+    data = preview_data(bp, stats(bp))
+    assert data["faces"] and data["colors"][0] == "#d9a833"
+    assert "Blueprint-Größe" in stats(bp) and "Tastendrücke" in stats(keys)
+
+
+@needs_node
+def test_blueprint_files_roundtrip(tmp_path):
+    stl = tmp_path / "rocket.stl"
+    save_stl_ascii(stl, rocket())
+    out = tmp_path / "bp"
+    assert main(["blueprint", str(stl), "--size", "20", "--finish", "caterium", "-o", str(out)]) == 0
+    sbp = list(out.glob("*.sbp"))
+    assert sbp and all(p.with_suffix(".sbpcfg").exists() for p in sbp)
+    assert (out / "PLACEMENT.txt").exists() and (out / "preview.html").exists()
+
+
+def test_cli_keys(tmp_path):
+    stl = tmp_path / "h.stl"
+    save_stl_ascii(stl, house())
+    out = tmp_path / "k"
+    assert main(["keys", str(stl), "--size", "12", "-o", str(out)]) == 0
+    plan = json.loads((out / "plan.json").read_text())
+    assert plan["beams"] and all(b["length"] <= 40 for b in plan["beams"])
+    assert "const APP = null" in (out / "preview.html").read_text()
+
+
+def test_app_builds_exports_and_types(tmp_path):
+    from satisfactory_printer.server import App
+
+    app = App(tmp_path / "models", tmp_path / "out")
+    up = app.upload("my rocket.stl", Path(ROOT / "examples" / "rocket.stl").read_bytes())
+    q = lambda **kw: {k: [str(v)] for k, v in kw.items()}  # noqa: E731
+    model, s, run = app.params(q(model=up["id"], size=15, finish="caterium"))
+    data = app.preview(model, s)
+    assert data["beams"] and data["output"] == "blueprint"
+    assert "Oberfläche bedeckt" in app.accuracy(model, s)
+    if not bpmod.check_node():
+        info = app.export(model, s, run)
+        from urllib.parse import unquote
+
+        names = zipfile.ZipFile(app.download(unquote(info["download"].split("=", 1)[1]))).namelist()
+        assert any(n.endswith(".sbp") for n in names)
+
+    model, s, run = app.params(q(model=up["id"], size=8, output="keys", kps=100, countdown=0, simulate=1))
+    st = app.run_start(model, s, run, "")
+    assert st["status"] in ("ready", "countdown", "running")
+    app.run_control("stop")
+    deadline = time.time() + 20
+    while app.run_status()["status"] not in ("stopped", "done") and time.time() < deadline:
+        time.sleep(0.05)
+    assert app.run_status()["status"] in ("stopped", "done")
 
 
 def test_parallel_matches_serial():
@@ -328,97 +291,3 @@ def test_parallel_matches_serial():
         assert np.array_equal(serial, metrics.nearest_distance(q, t, 0.61))
     finally:
         parallel.set_workers(None)
-
-
-# --------------------------------------------------------------------------- blueprint export
-
-
-def test_quaternion_puts_local_x_on_the_beam_and_z_on_the_surface():
-    from satisfactory_printer.blueprint import quat_from_axes
-
-    def rot(q, v):
-        x, y, z, w = q
-        u = np.array([x, y, z])
-        return v + 2 * w * np.cross(u, v) + 2 * np.cross(u, np.cross(u, v))
-
-    rng = np.random.default_rng(5)
-    for _ in range(50):
-        d = rng.normal(size=3)
-        n = rng.normal(size=3)
-        q = quat_from_axes(d, n)
-        assert abs(np.linalg.norm(q) - 1) < 1e-9
-        assert np.allclose(rot(q, np.array([1.0, 0, 0])), d / np.linalg.norm(d), atol=1e-9)
-        zl = rot(q, np.array([0, 0, 1.0]))
-        n_perp = n - (n @ d) * d / (d @ d)
-        assert np.allclose(zl, n_perp / np.linalg.norm(n_perp), atol=1e-9)
-
-
-def test_real_save_beam_convention():
-    """A vertical beam from a real save: rotation (-0.707, 0, -0.707, 0) maps local X to +Z."""
-    from satisfactory_printer.blueprint import quat_from_axes
-
-    q = quat_from_axes(np.array([0, 0, 1.0]), np.array([1.0, 0, 0]))
-    x, y, z, w = q
-    u = np.array([x, y, z])
-    v = np.array([1.0, 0, 0])
-    assert np.allclose(v + 2 * w * np.cross(u, v) + 2 * np.cross(u, np.cross(u, v)), [0, 0, 1])
-
-
-def test_tiles_split_beams_at_designer_borders():
-    from satisfactory_printer.blueprint import make_tiles
-
-    beams = [Beam((0.0, 0.0, 1.0), (100.0, 0.0, 1.0)), Beam((1.0, 1.0, 0.0), (1.0, 1.0, 10.0))]
-    normals = np.array([[0, 0, 1.0], [1.0, 0, 0]])
-    tiles = make_tiles(beams, normals, designer=(6, 6, 6), inset=0)
-    size = 48
-    total = 0.0
-    for t in tiles:
-        for s, e, _ in t.beams:
-            local_s, local_e = s - t.origin, e - t.origin
-            for p in (local_s, local_e):  # inside the designer box (origin = centre of the floor)
-                assert -size / 2 - 1e-6 <= p[0] <= size / 2 + 1e-6 and -size / 2 - 1e-6 <= p[1] <= size / 2 + 1e-6
-                assert -1e-6 <= p[2] <= size + 1e-6
-            total += np.linalg.norm(e - s)
-    assert abs(total - 110) < 1e-6  # nothing lost when splitting
-
-
-def test_blueprint_files_roundtrip(tmp_path):
-    import shutil
-
-    import pytest
-
-    from satisfactory_printer import blueprint as bpmod
-
-    if bpmod.check_node():
-        pytest.skip("node / blueprint writer not installed")
-    stl = tmp_path / "rocket.stl"
-    from make_examples import rocket
-
-    save_stl_ascii(stl, rocket())
-    out = tmp_path / "bp"
-    assert main(["blueprint", str(stl), "--size", "20", "-o", str(out)]) == 0
-    sbp = list(out.glob("*.sbp"))
-    assert sbp and all(p.with_suffix(".sbpcfg").exists() for p in sbp)
-    assert (out / "PLACEMENT.txt").exists() and (out / "preview.html").exists()
-    shutil.rmtree(out)
-
-
-def test_designer_sizes():
-    from satisfactory_printer.blueprint import auto_designer, make_tiles, parse_designer
-
-    assert parse_designer("6") == (6, 6, 6) and parse_designer("11x11x15") == (11, 11, 15)
-    assert parse_designer("auto") == "auto"
-    beams = [Beam((0.0, 0.0, 0.0), (81.0, 0.0, 0.0)), Beam((0.0, 0.0, 0.0), (0.0, 0.0, 120.0))]
-    normals = np.array([[0, 0, 1.0], [1.0, 0, 0]])
-    d = auto_designer(beams, normals, inset=0)
-    assert d == (11, 1, 16)  # 82 m, 1 m, 121 m incl. beam thickness -> whole foundations
-    assert len(make_tiles(beams, normals, d, inset=0)) == 1
-
-
-def test_drop_base_removes_only_the_pedestal():
-    from satisfactory_printer.mesh import drop_base
-
-    pedestal = cube(1.0) * np.array([20, 20, 2])  # wide flat block at the bottom
-    column = cube(1.0) * np.array([2, 2, 30]) + np.array([9, 9, 2])  # separate part on top of it
-    kept = drop_base(np.vstack([pedestal, column]), 0.16)
-    assert len(kept) == len(column) and kept[..., 2].min() >= 2

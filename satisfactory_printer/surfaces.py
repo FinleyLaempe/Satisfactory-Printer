@@ -1,14 +1,13 @@
-"""Surface-following beam generators.
+"""Turn a model surface into beams (`beams_from_surface`).
 
-* planes   - find flat regions (any orientation, incl. sloped/vertical diagonal planes) and
-             fill them with parallel long beams lying *in* the plane, plus the region outline.
-* contour  - slice the surface with parallel planes at every metre (rings / arcs), optionally
-             plus radial half-planes (ribs).
-* features - one beam chain along every sharp edge / open border of the mesh.
-* hybrid   - planes for flat regions, contours for the curved rest, features for the edges.
+* flat faces (bounded by sharp edges, any orientation) are filled with parallel long beams
+  lying in the plane - on tilted planes they run down the slope, so slopes are smooth;
+* everything curved is covered with staves: beams laid side by side along the direction
+  each part of the model runs (up a rocket body, along a twisted streak);
+* every sharp edge gets its own beam chain.
 
-All generators work on the mesh in model coordinates (metres, min corner at the origin) and
-return beams with integer endpoints.
+Works in model coordinates (metres). Endpoints are snapped to the 1 m nudge grid for the
+keyboard plan, or kept exact for blueprints (see beams.set_precise).
 """
 
 from __future__ import annotations
@@ -20,7 +19,7 @@ import numpy as np
 
 from . import beams as beams_mod
 from . import parallel
-from .beams import Beam, beams_from_segments_lattice, polyline_to_beams, split_segment
+from .beams import Beam, polyline_to_beams, split_segment
 
 
 # --------------------------------------------------------------------------- topology
@@ -154,9 +153,7 @@ def _fewest_lines_direction(normal: np.ndarray, pts: np.ndarray, candidates: lis
     return best
 
 
-def _plane_frame(
-    normal: np.ndarray, pts: np.ndarray, direction: str, edge_dirs: tuple = ()
-) -> tuple[np.ndarray, np.ndarray]:
+def _plane_frame(normal: np.ndarray, pts: np.ndarray, edge_dirs: tuple = ()) -> tuple[np.ndarray, np.ndarray]:
     """Pick the hatch direction d (beams run along d) and the spacing direction e, both in-plane."""
     up = np.array([0.0, 0.0, 1.0])
     level = np.cross(normal, up)  # horizontal line inside the plane
@@ -166,11 +163,7 @@ def _plane_frame(
     slope = np.cross(normal, level)  # steepest line inside the plane
     slope /= np.linalg.norm(slope)
 
-    if direction == "level":
-        d = level
-    elif direction == "slope":
-        d = slope
-    elif 0.05 < abs(float(normal[2])) < 0.95:
+    if 0.05 < abs(float(normal[2])) < 0.95:
         # tilted plane (roof, ramp): beams run down the slope, so its profile is one smooth
         # diagonal instead of a staircase of stacked horizontal beams
         d = slope
@@ -182,8 +175,7 @@ def _plane_frame(
 
 
 def hatch_region(
-    topo: Topology, region: Region, spacing: float, max_len: float, direction: str = "auto",
-    sharp: set[tuple[int, int]] | None = None,
+    topo: Topology, region: Region, spacing: float, max_len: float, sharp: set[tuple[int, int]] | None = None,
 ) -> list[Beam]:
     """Fill a planar region with parallel beams (1 m apart = closed surface).
 
@@ -208,7 +200,7 @@ def hatch_region(
         return bool(seg_sharp[int(np.argmin(d))])
 
     pts = tris.reshape(-1, 3)
-    d, e = _plane_frame(region.normal, pts, direction, _border_directions(topo, region))
+    d, e = _plane_frame(region.normal, pts, _border_directions(topo, region))
     origin = pts.mean(axis=0)
     # 2D coordinates: s along the beams, t across them
     s = (tris - origin) @ d  # (F, 3)
@@ -318,15 +310,6 @@ def _border_directions(topo: Topology, region: Region, limit: int = 8) -> list[n
     return vecs[:limit]
 
 
-def region_outline(topo: Topology, region: Region, tol: float, max_len: float) -> list[Beam]:
-    """Beams along the border of a planar region (crisp edges for hatched faces)."""
-    beams: list[Beam] = []
-    for chain, closed in _chain_edges(_region_border(topo, region)):
-        pts = topo.verts[chain[:-1] if closed else chain]
-        beams.extend(_dense_polyline_to_beams(pts, tol, max_len, "outline", closed))
-    return beams
-
-
 def _dense_polyline_to_beams(pts: np.ndarray, tol: float, max_len: float, kind: str, closed: bool) -> list[Beam]:
     """Resample at <= 0.5 m so grid snapping follows the true shape, then straighten."""
     if len(pts) < 2:
@@ -349,36 +332,12 @@ def sharp_border_fraction(topo: Topology, region: Region, sharp: set[tuple[int, 
     return float(lengths[flags].sum() / max(lengths.sum(), 1e-9))
 
 
-def beams_from_planes(
-    topo: Topology,
-    spacing: float = 1.0,
-    max_len: float = 40,
-    tol: float = 0.5,
-    direction: str = "auto",
-    min_area: float = 6.0,
-    outline: bool = True,
-) -> tuple[list[Beam], np.ndarray]:
-    """Planes mode. Returns (beams, mask of curved faces that weren't covered)."""
-    regions, curved = find_planar_regions(topo, min_area=min_area)
-    sharp = sharp_edge_set(topo)
-    beams: list[Beam] = []
-    for r in regions:
-        beams += hatch_region(topo, r, spacing, max_len, direction, sharp)
-        if outline:
-            beams += region_outline(topo, r, tol, max_len)
-    return beams, curved
-
-
 # --------------------------------------------------------------------------- feature edges
 
 
-def feature_edges(topo: Topology, angle: float = 30.0, tol: float = 0.5, max_len: float = 40,
-                  lattice: bool = False) -> list[Beam]:
+def feature_edges(topo: Topology, angle: float = 30.0, tol: float = 0.5, max_len: float = 40) -> list[Beam]:
     """Beams along sharp edges (dihedral angle > `angle`) and open borders of the mesh."""
     sharp = sorted(sharp_edge_set(topo, angle))
-    if lattice:
-        segs = [(topo.verts[u], topo.verts[v]) for u, v in sharp]
-        return beams_from_segments_lattice(segs, max_len, "edge")
     beams: list[Beam] = []
     for chain, closed in _chain_edges(sharp):
         pts = topo.verts[chain[:-1] if closed else chain]
@@ -509,8 +468,11 @@ def _flow_range(samp, w, cent, radius, start, stop):
     return out
 
 
-def _choose_families(n: np.ndarray, spacing: float, pattern: str, flow: np.ndarray | None):
-    """Pick a slicing family per face. Returns (families, steps, choice index per face)."""
+def _choose_families(n: np.ndarray, spacing: float, flow: np.ndarray):
+    """Pick a slicing family per face so its slices run along `flow` (staves).
+
+    Returns (families, level step per family, choice index per face).
+    """
     fams = SLICE_FAMILIES
     steps, gaps, aligns = [], [], []
     for u in fams:
@@ -521,105 +483,62 @@ def _choose_families(n: np.ndarray, spacing: float, pattern: str, flow: np.ndarr
         uh = ua / un
         # distance between neighbouring slices measured ON each face
         gaps.append((st / un) / np.sqrt(np.clip(1 - (n @ uh) ** 2, 1e-6, 1)))
-        if flow is not None:
-            t = np.cross(n, uh)  # direction the slice runs across the face
-            tn = np.linalg.norm(t, axis=1)
-            aligns.append(np.abs((t * flow).sum(axis=1)) / np.maximum(tn, 1e-9) * (tn > 1e-6))
+        t = np.cross(n, uh)  # direction the slice runs across the face
+        tn = np.linalg.norm(t, axis=1)
+        aligns.append(np.abs((t * flow).sum(axis=1)) / np.maximum(tn, 1e-9) * (tn > 1e-6))
     gaps = np.stack(gaps, axis=1)
-    rows = np.arange(len(n))
-    if pattern == "flow" and flow is not None:
-        aligns = np.stack(aligns, axis=1)
-        # simpler families win near-ties so neighbouring faces agree (long continuous staves)
-        simple = np.array([0 if sum(map(abs, u)) == 1 else 0.02 if max(map(abs, u)) == 1 else 0.04 for u in fams])
-        score = np.where(gaps <= spacing * 1.05, aligns - simple, -np.inf)
-        choice = np.where(np.isfinite(score.max(axis=1)), score.argmax(axis=1), gaps.argmin(axis=1))
-    else:
-        # rings: plain axis slices wherever they're already <= ~1 m apart on the face;
-        # only steep-diagonal faces fall back to the tighter diagonal families
-        axis_best = gaps[:, :3].argmin(axis=1)
-        choice = np.where(gaps[rows, axis_best] <= spacing * 1.05, axis_best, gaps[:, :9].argmin(axis=1))
+    aligns = np.stack(aligns, axis=1)
+    # simpler families win near-ties so neighbouring faces agree (long continuous staves)
+    simple = np.array([0 if sum(map(abs, u)) == 1 else 0.02 if max(map(abs, u)) == 1 else 0.04 for u in fams])
+    score = np.where(gaps <= spacing * 1.05, aligns - simple, -np.inf)
+    choice = np.where(np.isfinite(score.max(axis=1)), score.argmax(axis=1), gaps.argmin(axis=1))
     return fams, steps, choice
 
 
 def beams_from_contours(
     tris: np.ndarray,
-    ring_spacing: float = 1.0,
-    rib_spacing: float = 0.0,
-    axes: str = "auto",
+    spacing: float = 1.0,
     tol: float = 0.5,
     max_len: float = 40,
-    pattern: str = "flow",
     flow: np.ndarray | None = None,
 ) -> list[Beam]:
-    """Slice the surface with parallel planes at integer levels about `ring_spacing` apart.
+    """Staves: slice curved surfaces so the beams run along each part, ~`spacing` apart.
 
-    pattern="flow" (staves): every face is sliced so the beams run along the direction its
-    part of the model runs - up a rocket body, along a twisted streak - side by side like
-    barrel staves. `flow` can pass precomputed directions (see local_flow_directions).
-    pattern="rings": steep walls get horizontal rings, flatter tops vertical arcs.
-    axes="x"/"z"/"xyz"...: plain slices perpendicular to those axes instead.
-    Ribs: optional vertical half-planes around the centre axis, ~`rib_spacing` apart at the
-    widest point (0 = none).
+    Each face is cut by the plane family (axis or diagonal, levels on the 1 m grid) whose
+    slices run closest to the local flow direction (local_flow_directions; pass `flow` to
+    reuse precomputed directions) while staying <= `spacing` apart on the face.
     """
     beams: list[Beam] = []
     if len(tris) == 0:
         return beams
-    pts = tris.reshape(-1, 3)
-    lo, hi = pts.min(axis=0), pts.max(axis=0)
-
     n = np.cross(tris[:, 1] - tris[:, 0], tris[:, 2] - tris[:, 0])
     n = n / np.maximum(np.linalg.norm(n, axis=1, keepdims=True), 1e-12)
-    if axes == "auto":
-        if pattern == "flow" and flow is None:
-            flow = local_flow_directions(tris)
-        fams, steps, choice = _choose_families(n, ring_spacing, pattern, flow)
-        # (seams between groups are closed by the gap-filling pass afterwards)
-        groups = [(u, steps[k], choice == k) for k, u in enumerate(fams)]
-    else:
-        step = max(int(round(ring_spacing)), 1)
-        groups = [(tuple(int(a == c) for c in "xyz"), step, np.ones(len(tris), dtype=bool)) for a in axes]
+    if flow is None:
+        flow = local_flow_directions(tris)
+    fams, steps, choice = _choose_families(n, spacing, flow)
 
     jobs = []
-    for u, step, mask in groups:
+    for k, u in enumerate(fams):
+        mask = choice == k
         if not mask.any():
             continue
         sub = tris[mask]
         u_arr = np.array(u, dtype=float)
-        kind = "ring" if u == (0, 0, 1) else ("stave" if pattern == "flow" else "arc")
         lv = tris @ u_arr  # level of every vertex (integer points have integer levels)
         s_lv = sub @ u_arr
-        levels = list(range(int(math.floor(s_lv.min())), int(math.ceil(s_lv.max())) + 1, step))
+        levels = list(range(int(math.floor(s_lv.min())), int(math.ceil(s_lv.max())) + 1, steps[k]))
         # independent slices: spread them over the CPU cores in batches
-        for k in range(0, len(levels), 16):
-            jobs.append((sub, u, levels[k:k + 16], float(lv.min()), float(lv.max()), tol, max_len, kind,
+        # (seams between families are closed by the gap filler afterwards)
+        for i in range(0, len(levels), 16):
+            jobs.append((sub, u, levels[i:i + 16], float(lv.min()), float(lv.max()), tol, max_len, "stave",
                          beams_mod.PRECISE))
     for part in parallel.pmap(_slice_levels, jobs):
         beams += part
-
-    if rib_spacing > 0:
-        centre = (lo + hi) / 2
-        radius = float(np.linalg.norm(pts[:, :2] - centre[:2], axis=1).max())
-        count = max(int(round(2 * math.pi * radius / rib_spacing)), 4)
-        for k in range(count):
-            ang = 2 * math.pi * k / count
-            out_dir = np.array([math.cos(ang), math.sin(ang), 0.0])
-            normal = np.array([-math.sin(ang), math.cos(ang), 0.0])
-            polys = slice_plane(tris, normal, float(normal @ centre))
-            half = []
-            for p in polys:
-                # keep only the part on the outward side of the centre axis
-                side = (p - centre) @ out_dir > 0
-                for run in _true_runs(side):
-                    if len(run) >= 2:
-                        half.append(p[run])
-            beams += _polylines_to_beams(half, tol, max_len, "rib")
     return beams
 
 
 def _slice_levels(sub, u, levels, lo_l, hi_l, tol, max_len, kind, precise=False) -> list[Beam]:
     """Cut `sub` with the planes u . x = level for each level and straighten into beams."""
-    from . import beams as beams_mod
-
     beams_mod.set_precise(precise)  # runs in a worker process: carry the mode over
     u_arr = np.array(u, dtype=float)
     norm = float(np.linalg.norm(u_arr))
@@ -635,67 +554,34 @@ def _slice_levels(sub, u, levels, lo_l, hi_l, tol, max_len, kind, precise=False)
     return beams
 
 
-def _true_runs(mask: np.ndarray) -> list[np.ndarray]:
-    idx = np.flatnonzero(mask)
-    if idx.size == 0:
-        return []
-    breaks = np.flatnonzero(np.diff(idx) > 1)
-    return np.split(idx, breaks + 1)
+# --------------------------------------------------------------------------- everything together
 
 
-# --------------------------------------------------------------------------- wireframe
-
-
-def beams_from_mesh_edges(
-    topo: Topology, max_len: float = 40, feature_angle: float = 1.0, lattice: bool = True
-) -> list[Beam]:
-    """One beam per mesh edge (edges between nearly coplanar faces skipped)."""
-    cos_limit = math.cos(math.radians(feature_angle))
-    segs = []
-    for (u, v), faces in topo.edge_faces.items():
-        if len(faces) == 2 and abs(float(topo.normals[faces[0]] @ topo.normals[faces[1]])) >= cos_limit:
-            continue
-        segs.append((topo.verts[u], topo.verts[v]))
-    if lattice:
-        return beams_from_segments_lattice(segs, max_len, "edge")
-    from .beams import beams_from_segments
-
-    return beams_from_segments(segs, max_len, "edge")
-
-
-# --------------------------------------------------------------------------- hybrid
-
-
-def beams_hybrid(
+def beams_from_surface(
     topo: Topology,
     spacing: float = 1.0,
-    ring_spacing: float = 1.0,
-    rib_spacing: float = 0.0,
     tol: float = 0.5,
     max_len: float = 40,
-    direction: str = "auto",
     min_area: float = 6.0,
     edge_angle: float = 30.0,
     flat_border: float = 0.75,
-    pattern: str = "flow",
 ) -> list[Beam]:
-    """Planes where the model is flat, contours where it's curved, beams on sharp edges.
+    """Flat faces -> in-plane beams, curved parts -> staves, sharp edges -> edge beams.
 
     A flat region only counts as a real flat face if most of its border is a sharp edge.
     Facets of a low-poly curved surface (cylinders, twisted shapes) have soft seams, so they
-    are sliced as one continuous curved surface instead of being hatched facet by facet.
+    are covered as one continuous curved surface instead of facet by facet.
     """
     sharp = sharp_edge_set(topo, edge_angle)
     regions, curved = find_planar_regions(topo, min_area=min_area)
     beams: list[Beam] = []
     for r in regions:
         if sharp_border_fraction(topo, r, sharp) >= flat_border:
-            beams += hatch_region(topo, r, spacing, max_len, direction, sharp)
+            beams += hatch_region(topo, r, spacing, max_len, sharp)
         else:
             curved[r.faces] = True
     if curved.any():
-        flow = local_flow_directions(topo.tris)[curved] if pattern == "flow" else None
-        beams += beams_from_contours(topo.tris[curved], ring_spacing, rib_spacing, "auto", tol, max_len,
-                                     pattern, flow)
+        flow = local_flow_directions(topo.tris)[curved]
+        beams += beams_from_contours(topo.tris[curved], spacing, tol, max_len, flow)
     beams += feature_edges(topo, edge_angle, tol, max_len)
     return beams

@@ -64,8 +64,6 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "key_interval": 0.05,  # pause between key presses
     "click_delay": 0.25,  # pause after a click (game needs time to register)
     "beam_delay": 0.3,  # pause after each beam
-    "max_beam_length": 40,  # longest beam the game allows (m)
-    "max_nudge": 0,  # 0 = no limit; otherwise warn when one axis needs more nudges
     # beam roll with the mouse wheel while spanning: 6 notches = 90°. Wheel up turns the beam
     # counter-clockwise when looking down its axis from its end towards its start (a beam
     # pointing up, seen from above) = positive turn about start->end.
@@ -158,12 +156,10 @@ def nudge_actions(vec: Vec, cfg: dict[str, Any]) -> list[Action]:
 
 def build_plan(
     beams: list[Beam], cfg: dict[str, Any], rolls: list[int] | None = None
-) -> tuple[list[BeamStep], Vec, list[str]]:
-    """Return (steps, applied model offset, warnings). `rolls`: wheel notches per beam."""
+) -> tuple[list[BeamStep], Vec]:
+    """Return (steps, applied model offset). `rolls`: wheel notches per beam."""
     offset = compute_offset(beams, cfg)
-    warnings: list[str] = []
     steps: list[BeamStep] = []
-    max_nudge = int(cfg.get("max_nudge") or 0)
 
     for i, raw in enumerate(beams):
         beam = raw.translated(offset)
@@ -183,8 +179,6 @@ def build_plan(
             elif kind == "nudge":
                 vec = shape if arg == "shape" else place
                 step.actions.extend(nudge_actions(vec, cfg))  # type: ignore[arg-type]
-                if max_nudge and any(abs(v) > max_nudge for v in vec):
-                    warnings.append(f"beam {i}: nudge {vec} exceeds max_nudge={max_nudge}")
             elif kind == "click":
                 step.actions.append(Action("click"))
                 step.actions.append(Action("wait", seconds=float(cfg["click_delay"])))
@@ -197,7 +191,7 @@ def build_plan(
                 raise ValueError(f"Unknown macro token: {token}")
         step.actions.append(Action("wait", seconds=float(cfg["beam_delay"])))
         steps.append(step)
-    return steps, offset, warnings
+    return steps, offset
 
 
 def plan_to_json(steps: list[BeamStep], offset: Vec, cfg: dict[str, Any]) -> dict[str, Any]:

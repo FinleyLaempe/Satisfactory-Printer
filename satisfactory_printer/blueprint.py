@@ -223,21 +223,20 @@ def placement_guide(results: list[dict], designer) -> str:
     if isinstance(designer, int):
         designer = (designer, designer, designer)
     sx, sy, sz = (d * FOUNDATION_M for d in designer)
-    lines = [f"Blueprint designer size: {designer[0]}x{designer[1]}x{designer[2]} foundations "
-             f"= {sx:g} x {sy:g} x {sz:g} m"]
+    lines = [f"Blueprint-Größe: {designer[0]}×{designer[1]}×{designer[2]} Fundamente = {sx:g} × {sy:g} × {sz:g} m"]
     if max(designer) > 6:
-        lines.append("(bigger than the in-game Mk.3 designer - the game accepts it, as with designer mods)")
+        lines.append("(größer als der Mk.3-Designer im Spiel – das Spiel nimmt das an, wie bei Designer-Mods)")
     if len(results) == 1:
-        lines.append(f"One blueprint: {results[0]['file']} ({results[0]['beams']} beams). Place it and done.")
+        lines.append(f"Ein Blueprint: {results[0]['file']} ({results[0]['beams']} Träger). Platzieren, fertig.")
         return "\n".join(lines) + "\n"
     lines += [
-        f"{len(results)} tiles. Place tile 0_0_0 first. Every other tile goes exactly next to / above it:",
-        f"tile (i, j, k) = i x {sx:g} m to the right, j x {sy:g} m forward, k x {sz:g} m up",
-        "(whole foundations, so they snap to the same grid).",
+        f"{len(results)} Teile. Zuerst Teil 0_0_0 setzen, jedes weitere Teil i_j_k genau",
+        f"i × {sx:g} m nach rechts, j × {sy:g} m nach vorne und k × {sz:g} m nach oben",
+        "(ganze Fundamente, sie rasten am selben Raster ein).",
         "",
     ]
     for r in results:
         i, j, k = r["tile"]
-        lines.append(f"  {r['file']:40s} right {i * sx:6g} m, forward {j * sy:6g} m, up {k * sz:6g} m"
-                     f"   ({r['beams']} beams)")
+        lines.append(f"  {r['file']:36s} rechts {i * sx:5g} m, vorne {j * sy:5g} m, oben {k * sz:5g} m"
+                     f"   ({r['beams']} Träger)")
     return "\n".join(lines) + "\n"

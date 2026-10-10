@@ -1,14 +1,12 @@
-"""Beam primitives and the generic helpers every generation mode shares.
+"""Beams and the helpers to make them: straighten polylines, split long beams, merge.
 
-Coordinates are model coordinates in metres; beam endpoints are integers because every
-endpoint has to be reachable with whole 1 m nudges from the anchor. A beam's endpoints are
-the centres of its end faces (centreline), so a voxel at integer position p is covered by a
-beam whose centreline passes through p.
+Coordinates are model coordinates in metres. A beam runs along its centre line from
+`start` to `end`. For the keyboard plan every endpoint is snapped to the 1 m nudge grid
+(whole nudges from the anchor); for blueprints (set_precise) endpoints stay exact.
 """
 
 from __future__ import annotations
 
-import heapq
 import math
 from dataclasses import dataclass, field
 
@@ -64,67 +62,6 @@ def _snap(p) -> tuple:
 
 def _ivec(p) -> Vec:
     return (int(p[0]), int(p[1]), int(p[2]))
-
-
-# --------------------------------------------------------------------------- 1 m lattice
-
-# The 13 canonical directions of a 1x1x1 cube (edges, face diagonals, space diagonals);
-# together with their negatives they are the 26 neighbour directions.
-LATTICE_DIRECTIONS: list[Vec] = [
-    (dx, dy, dz)
-    for dx in (-1, 0, 1)
-    for dy in (-1, 0, 1)
-    for dz in (-1, 0, 1)
-    if (dx, dy, dz) > (0, 0, 0)
-]
-AXIS_DIRECTIONS: list[Vec] = [(1, 0, 0), (0, 1, 0), (0, 0, 1)]
-
-
-def lattice_walk(start: np.ndarray, end: np.ndarray) -> list[Vec]:
-    """Trace a segment through the 1 m grid (3D DDA); each step is one of the 26 directions."""
-    start = np.asarray(start, dtype=float)
-    end = np.asarray(end, dtype=float)
-    n = max(int(math.ceil(float(np.abs(end - start).max()))), 1)
-    pts: list[Vec] = []
-    for k in range(n + 1):
-        # floor(x + 0.5) instead of round(): monotone, so steps never jump by 2
-        p = _ivec([math.floor(c + 0.5) for c in start + (end - start) * k / n])
-        if not pts or p != pts[-1]:
-            pts.append(p)
-    return pts
-
-
-def beams_from_segments_lattice(
-    segments: list[tuple[np.ndarray, np.ndarray]], max_len: float = 40, kind: str = "edge"
-) -> list[Beam]:
-    """Restrict segments to the 26 cube directions and merge them into maximal straight beams."""
-    canon = set(LATTICE_DIRECTIONS)
-    edges: dict[Vec, set[Vec]] = {d: set() for d in LATTICE_DIRECTIONS}
-    for a, b in segments:
-        pts = lattice_walk(a, b)
-        for p, q in zip(pts, pts[1:]):
-            step = _ivec([qc - pc for pc, qc in zip(p, q)])
-            if step in canon:
-                edges[step].add(p)
-            else:
-                edges[_ivec([-c for c in step])].add(q)
-
-    beams: list[Beam] = []
-    for d, starts in edges.items():
-        max_steps = max(int(max_len / math.sqrt(sum(c * c for c in d)) + 1e-9), 1)
-        for p in starts:
-            if _ivec([pc - dc for pc, dc in zip(p, d)]) in starts:
-                continue  # not the beginning of a chain
-            length, q = 0, p
-            while q in starts:
-                q = _ivec([qc + dc for qc, dc in zip(q, d)])
-                length += 1
-            for pos in range(0, length, max_steps):
-                n = min(max_steps, length - pos)
-                s = _ivec([pc + dc * pos for pc, dc in zip(p, d)])
-                e = _ivec([pc + dc * (pos + n) for pc, dc in zip(p, d)])
-                beams.append(Beam(s, e, kind))
-    return beams
 
 
 # --------------------------------------------------------------------------- polylines
@@ -205,94 +142,6 @@ def split_segment(start: np.ndarray, end: np.ndarray, max_len: float, kind: str 
         if max_len <= 0 or all(b.length <= max_len + 1e-9 for b in beams) or pieces > 1000:
             return beams
         pieces += 1
-
-
-def beams_from_segments(
-    segments: list[tuple[np.ndarray, np.ndarray]], max_len: float = 40, kind: str = "edge"
-) -> list[Beam]:
-    """Free directions: snap each segment's endpoints to the grid (any integer vector)."""
-    seen: set[Beam] = set()
-    out: list[Beam] = []
-    for s, e in segments:
-        for beam in split_segment(s, e, max_len, kind):
-            key = beam.canonical()
-            if key not in seen:
-                seen.add(key)
-                out.append(beam)
-    return out
-
-
-# --------------------------------------------------------------------------- voxels
-
-
-def beams_from_voxels(
-    grid: np.ndarray, max_len: float = 40, directions: str = "26", axis: str | None = None
-) -> list[Beam]:
-    """Cover every filled voxel with as few beams as possible (greedy set cover).
-
-    Voxel (i, j, k) has its centre at integer position (i, j, k). Candidate beams are straight
-    runs of filled voxels along the allowed directions (3 axes, or all 13 cube directions incl.
-    diagonals). Beams may overlap - clipping is free in-game - so the greedy picks whichever
-    beam covers the most still-uncovered voxels, preferring axis directions on ties.
-    """
-    if axis:
-        dirs = [AXIS_DIRECTIONS["xyz".index(axis)]]
-    else:
-        dirs = AXIS_DIRECTIONS if directions == "6" else LATTICE_DIRECTIONS
-    filled = {_ivec(p) for p in np.argwhere(grid)}
-    if not filled:
-        return []
-
-    # candidate runs: maximal lines through filled voxels, cut into windows <= max length
-    candidates: list[tuple[Vec, list[Vec]]] = []
-    for d in dirs:
-        step_len = math.sqrt(sum(c * c for c in d))
-        max_steps = max(int(max_len / step_len + 1e-9), 1)
-        for p in filled:
-            if _ivec([a - b for a, b in zip(p, d)]) in filled:
-                continue
-            line = [p]
-            while (q := _ivec([a + b for a, b in zip(line[-1], d)])) in filled:
-                line.append(q)
-            if len(line) == 1:
-                continue
-            # overlapping windows so the greedy can choose where long runs get cut
-            stride = max(max_steps // 2, 1)
-            s = 0
-            while True:
-                window = line[s : s + max_steps + 1]
-                candidates.append((d, window))
-                if s + max_steps >= len(line) - 1:
-                    break
-                s += stride
-
-    covered: set[Vec] = set()
-    beams: list[Beam] = []
-    # lazy greedy: priority = (-new voxels, diagonal penalty, index)
-    heap = [(-len(c[1]), 0 if c[0] in AXIS_DIRECTIONS else 1, i) for i, c in enumerate(candidates)]
-    heapq.heapify(heap)
-    while heap:
-        neg, pen, i = heapq.heappop(heap)
-        voxels = candidates[i][1]
-        gain = sum(1 for v in voxels if v not in covered)
-        if gain == 0:
-            continue
-        if gain < -neg:
-            heapq.heappush(heap, (-gain, pen, i))
-            continue
-        # trim already-covered voxels off both ends (overlap only where it saves a beam)
-        lo = next(k for k, v in enumerate(voxels) if v not in covered)
-        hi = len(voxels) - 1 - next(k for k, v in enumerate(reversed(voxels)) if v not in covered)
-        if hi == lo:  # single new voxel: 1 m stub towards a neighbour
-            lo, hi = (lo, lo + 1) if lo + 1 < len(voxels) else (lo - 1, lo)
-        voxels = voxels[lo : hi + 1]
-        beams.append(Beam(voxels[0], voxels[-1], "voxel"))
-        covered.update(voxels)
-
-    # isolated voxels with no filled neighbour in any direction: 1 m vertical stub
-    for p in filled - covered:
-        beams.append(Beam(p, (p[0], p[1], p[2] + 1), "voxel"))
-    return beams
 
 
 # --------------------------------------------------------------------------- clean-up
