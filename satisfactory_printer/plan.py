@@ -42,11 +42,13 @@ DEFAULT_CONFIG: dict[str, Any] = {
     #   nudge:shape     nudge by (start - end)  -> sets length/direction
     #   nudge:place     nudge by end            -> moves beam into place
     #   click           left mouse click
+    #   roll            mouse wheel notches that turn the beam flat onto the surface
     #   wait:<seconds>  pause
     "beam_macro": [
         "key:lock",
         "nudge:shape",
         "click",
+        "roll",
         "key:lock",
         "nudge:place",
         "click",
@@ -64,6 +66,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "beam_delay": 0.3,  # pause after each beam
     "max_beam_length": 40,  # longest beam the game allows (m)
     "max_nudge": 0,  # 0 = no limit; otherwise warn when one axis needs more nudges
+    # beam roll with the mouse wheel while spanning: 6 notches = 90°
+    "roll": True,
+    "roll_step_deg": 15,
+    "roll_direction": 1,  # -1 if the game turns the other way than the preview
 }
 
 
@@ -93,7 +99,7 @@ def keystrokes_per_second(cfg: dict[str, Any]) -> float:
 
 @dataclass
 class Action:
-    kind: str  # "key", "click", "wait"
+    kind: str  # "key", "click", "scroll", "wait"
     key: str = ""
     times: int = 1
     seconds: float = 0.0
@@ -103,6 +109,8 @@ class Action:
             return {"key": self.key, "times": self.times}
         if self.kind == "click":
             return {"click": "left"}
+        if self.kind == "scroll":
+            return {"scroll": self.times}
         return {"wait": self.seconds}
 
     @staticmethod
@@ -111,6 +119,8 @@ class Action:
             return Action("key", key=d["key"], times=int(d.get("times", 1)))
         if "click" in d:
             return Action("click")
+        if "scroll" in d:
+            return Action("scroll", times=int(d["scroll"]))
         return Action("wait", seconds=float(d["wait"]))
 
 
@@ -119,10 +129,11 @@ class BeamStep:
     index: int
     beam: Beam
     actions: list[Action] = field(default_factory=list)
+    roll: int = 0  # wheel notches (signed)
 
     @property
     def key_presses(self) -> int:
-        return sum(a.times for a in self.actions if a.kind in ("key", "click"))
+        return sum(abs(a.times) for a in self.actions if a.kind in ("key", "click", "scroll"))
 
 
 def compute_offset(beams: list[Beam], cfg: dict[str, Any]) -> Vec:
@@ -143,8 +154,10 @@ def nudge_actions(vec: Vec, cfg: dict[str, Any]) -> list[Action]:
     return out
 
 
-def build_plan(beams: list[Beam], cfg: dict[str, Any]) -> tuple[list[BeamStep], Vec, list[str]]:
-    """Return (steps, applied model offset, warnings)."""
+def build_plan(
+    beams: list[Beam], cfg: dict[str, Any], rolls: list[int] | None = None
+) -> tuple[list[BeamStep], Vec, list[str]]:
+    """Return (steps, applied model offset, warnings). `rolls`: wheel notches per beam."""
     offset = compute_offset(beams, cfg)
     warnings: list[str] = []
     steps: list[BeamStep] = []
@@ -152,9 +165,14 @@ def build_plan(beams: list[Beam], cfg: dict[str, Any]) -> tuple[list[BeamStep], 
 
     for i, raw in enumerate(beams):
         beam = raw.translated(offset)
+        # the end that is placed last gets nudged from the anchor: use the nearer end
+        # (the same beam drawn the other way round; roll is symmetric for a square beam)
+        if sum(map(abs, beam.start)) < sum(map(abs, beam.end)):
+            beam = Beam(beam.end, beam.start, beam.kind)
         shape = tuple(s - e for s, e in zip(beam.start, beam.end))
         place = beam.end
-        step = BeamStep(i, beam)
+        roll = (rolls[i] if rolls else 0) if cfg.get("roll", True) else 0
+        step = BeamStep(i, beam, roll=roll)
         for token in cfg["beam_macro"]:
             kind, _, arg = token.partition(":")
             if kind == "key":
@@ -167,6 +185,9 @@ def build_plan(beams: list[Beam], cfg: dict[str, Any]) -> tuple[list[BeamStep], 
             elif kind == "click":
                 step.actions.append(Action("click"))
                 step.actions.append(Action("wait", seconds=float(cfg["click_delay"])))
+            elif kind == "roll":
+                if roll:
+                    step.actions.append(Action("scroll", times=roll * int(cfg.get("roll_direction", 1))))
             elif kind == "wait":
                 step.actions.append(Action("wait", seconds=float(arg)))
             else:
@@ -187,6 +208,7 @@ def plan_to_json(steps: list[BeamStep], offset: Vec, cfg: dict[str, Any]) -> dic
                 "start": list(s.beam.start),
                 "end": list(s.beam.end),
                 "length": round(s.beam.length, 3),
+                "roll": s.roll,
                 "actions": [a.to_dict() for a in s.actions],
             }
             for s in steps
@@ -204,5 +226,7 @@ def plan_to_text(steps: list[BeamStep]) -> str:
                 parts.append(f"{a.key.upper()}x{a.times}" if a.times > 1 else a.key.upper())
             elif a.kind == "click":
                 parts.append("CLICK")
+            elif a.kind == "scroll":
+                parts.append(f"WHEEL{'+' if a.times > 0 else ''}{a.times}")
         lines.append(f"#{s.index:04d} {s.beam.start}->{s.beam.end} len={s.beam.length:.2f}:  " + " ".join(parts))
     return "\n".join(lines) + "\n"

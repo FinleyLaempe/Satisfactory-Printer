@@ -154,11 +154,42 @@ def test_hybrid_house_is_accurate():
 
 
 def test_contour_sphere_is_closed_surface():
+    from satisfactory_printer.metrics import fill_gaps
+
     tris = scale_to_grid(sphere(), size=16)
-    beams = surfaces.beams_from_contours(tris)
-    m = evaluate(beams, tris)
-    assert m["coverage_pct"] > 97 and m["stray_pct"] < 2
-    assert {b.kind for b in beams} == {"ring", "arc"}
+    rings = surfaces.beams_from_contours(tris, pattern="rings")
+    assert {b.kind for b in rings} <= {"ring", "arc"}
+    staves = surfaces.beams_from_contours(tris, pattern="flow")
+    assert any(b.kind == "stave" for b in staves)
+    closed = fill_gaps(staves, tris)
+    m = evaluate(closed, tris)
+    assert m["coverage_pct"] >= 99.5 and m["stray_pct"] < 2
+
+
+def test_rocket_body_gets_vertical_staves():
+    """A tall revolved body: staves should run up the body, not around it."""
+    from make_examples import rocket
+
+    tris = scale_to_grid(rocket(), size=30)
+    beams = surfaces.beams_from_contours(tris, pattern="flow")
+    long = [b for b in beams if b.length >= 3]
+    vertical = [b for b in long if abs(b.vector[2]) / b.length > 0.7]
+    assert len(vertical) > 0.6 * len(long)
+
+
+def test_roll_puts_a_face_on_the_surface():
+    from satisfactory_printer.orient import roll_steps
+
+    # horizontal beam along x lying on a 30°-tilted roof (normal rotated about x)
+    ang = np.radians(30)
+    n = np.array([0, -np.sin(ang), np.cos(ang)])
+    tri = np.array([[[-50, 0, 0], [50, 0, 0], [0, 10 * np.cos(ang), 10 * np.sin(ang)]]])
+    assert np.allclose(np.cross(tri[0, 1] - tri[0, 0], tri[0, 2] - tri[0, 0]) / np.linalg.norm(
+        np.cross(tri[0, 1] - tri[0, 0], tri[0, 2] - tri[0, 0])), n)
+    (steps,) = roll_steps([Beam((0, 2, 1), (10, 2, 1))], tri)
+    assert abs(steps) == 2  # 30° = 2 notches of 15°
+    (flat,) = roll_steps([Beam((0, 0, 0), (10, 0, 0))], np.array([[[-50, -50, 0], [50, -50, 0], [0, 50, 0]]]))
+    assert flat == 0
 
 
 def test_wireframe_cube_has_12_edges():

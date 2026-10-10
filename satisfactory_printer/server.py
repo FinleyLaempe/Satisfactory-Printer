@@ -22,7 +22,7 @@ from urllib.parse import parse_qs, urlparse
 from .mesh import load_mesh
 from .plan import keystrokes_per_second, load_config, plan_to_json
 
-LIVE_PARAMS = ("size", "mode", "tolerance", "spacing")  # change the beams -> cache key
+LIVE_PARAMS = ("size", "mode", "tolerance", "spacing", "pattern")  # change the beams -> cache key
 RUN_PARAMS = ("kps", "start_at", "countdown", "simulate")  # only change how it's typed
 
 
@@ -48,6 +48,7 @@ class LiveSession:
             "mode": self.base.mode,
             "tolerance": float(self.base.tolerance),
             "spacing": float(self.base.spacing),
+            "pattern": self.base.pattern,
             "kps": float(self.base.kps or keystrokes_per_second(load_config(self.base.config))),
             "start_at": 0,
             "countdown": 5,
@@ -56,7 +57,7 @@ class LiveSession:
         for k, v in (query or {}).items():
             if not v or k not in LIVE_PARAMS + RUN_PARAMS:
                 continue
-            if k == "mode":
+            if k in ("mode", "pattern"):
                 p[k] = v[0]
             elif k == "simulate":
                 p[k] = v[0].lower() in ("1", "true", "on", "yes")
@@ -67,6 +68,8 @@ class LiveSession:
         p["kps"] = min(max(p["kps"], 0.5), 100.0)
         if p["mode"] not in self.cli.MODES:
             raise ValueError(f"unknown mode {p['mode']!r}")
+        if p["pattern"] not in ("flow", "rings"):
+            raise ValueError(f"unknown pattern {p['pattern']!r}")
         p["size"] = min(max(p["size"], 1.0), 500.0)
         p["tolerance"] = min(max(p["tolerance"], 0.05), 10.0)
         p["spacing"] = min(max(p["spacing"], 1.0), 20.0)
@@ -77,6 +80,7 @@ class LiveSession:
         args.size, args.scale = p["size"], None
         args.mode = p["mode"]
         args.tolerance = p["tolerance"]
+        args.pattern = p["pattern"]
         # one "spacing" slider drives both flat-area and contour spacing
         args.spacing = args.ring_spacing = p["spacing"]
         return args

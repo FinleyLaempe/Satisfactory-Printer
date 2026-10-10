@@ -23,8 +23,10 @@ point: the **anchor**. Every beam is then built from the anchor using only keys:
    Page Up/Down = vertical, 1 press = 1 m).
 2. Left click without moving the mouse. The beam is drawn from the nudged start to the
    anchor, so step 1's nudge sets its **length and direction**.
-3. `H` again, then nudge the whole beam by `end` (its end point relative to the anchor).
-4. Left click to build.
+3. While spanning, the mouse wheel rolls the beam around its own axis (6 notches = 90°).
+   The plan turns each beam so a flat face lies on the model's surface.
+4. `H` again, then nudge the whole beam by `end` (its end point relative to the anchor).
+5. Left click to build.
 
 The sequence is the `beam_macro` setting in the config, so you can change it if the game
 behaves differently (see *Calibration*).
@@ -74,8 +76,8 @@ The preview loads three.js from a CDN, so it needs an internet connection.
 
 `serve` starts a small local web server (127.0.0.1 only) and opens the preview with controls:
 
-- **Size, mode, tolerance, spacing sliders.** Every change rebuilds the beams and redraws
-  them. Accuracy numbers follow a moment later.
+- **Size (5–200 m), mode, curved-surface pattern, tolerance and spacing.** Every change
+  rebuilds the beams and redraws them. Accuracy numbers follow a moment later.
 - **Typing speed (keystrokes per second).** Updates the build-time estimate instantly and
   sets the key timing of saved and started plans. Also available as `--kps` on `build`.
 - **Save plan.** Writes `plan.json`, `keys.txt`, `preview.html` etc. to
@@ -95,22 +97,20 @@ The build-progress slider uses the same view: solid = placed, red = next, faint 
 
 | mode               | what you get                                                    | best for |
 |--------------------|-----------------------------------------------------------------|----------|
-| `hybrid` (default) | flat areas → `planes`, curved areas → `contour`, plus a beam along every sharp edge | almost everything |
+| `hybrid` (default) | real flat faces (bounded by sharp edges) → `planes`, everything curved → `contour` staves, plus a beam along every sharp edge, then the gap filler | almost everything |
 | `planes`           | every flat area (any orientation) filled with parallel beams lying *in* that plane. Tilted planes (roofs, ramps) get beams running **down the slope**, so they're smooth diagonals instead of steps | buildings, vehicles, low-poly |
-| `contour`          | the surface sliced every metre. Each face is cut along the axis that suits its slope: steep walls → horizontal rings, flatter tops → vertical slices that follow the curve as arcs. Each slice is straightened into long beams within `--tolerance` | organic shapes, statues |
+| `contour`          | curved surfaces as **staves** (`--pattern flow`, default): long beams laid side by side along the direction each part runs, like barrel staves. Up a rocket body, along a twisted streak. `--pattern rings` slices horizontally instead. Slices are straightened into long beams within `--tolerance` | organic shapes, statues |
 | `voxel`            | 1 m cubes, hollowed to a shell (`--solid` keeps the inside). Covered greedily with the fewest beams, mixing all 3 axes and diagonals (`--directions 6` = axes only) | a blocky look |
 | `wireframe`        | one beam per mesh edge (`--directions 26` = cube directions only, default) | low-poly sculptures |
 
-Example: the bundled models at 20 m (`python examples/make_examples.py`):
+### No gaps
 
-| model  | mode      | beams | build time | surface coverage | mean deviation |
-|--------|-----------|------:|-----------:|-----------------:|---------------:|
-| house  | hybrid    |   113 |     11 min |             100% |         0.27 m |
-| house  | voxel     |    73 |      7 min |              89% |         0.59 m |
-| house  | wireframe |    17 |      2 min |              18% |         1.96 m |
-| sphere | hybrid    |  1079 |     75 min |             100% |         0.30 m |
-| sphere | hybrid, `--ring-spacing 2 --tolerance 1` | 231 | 18 min | 83% | 0.49 m |
-| sphere | voxel     |   236 |     17 min |              87% |         0.53 m |
+The surface modes end with a **gap filler**. It looks for every spot on the model surface
+that isn't hidden under a beam. Neighbouring holes are grouped into cracks, and each crack
+gets one beam along its length. Its grid corners are chosen so the beam covers the whole
+crack while lying as flat on the surface as possible. The result is 100% surface coverage.
+Patch beams show in orange in the preview (colour by method). Turn the filler off with
+`--no-fill`.
 
 ### Realism vs. build time
 
@@ -124,10 +124,15 @@ Example: the bundled models at 20 m (`python examples/make_examples.py`):
 | `--rib-spacing`     | 0       | add ribs: beams running up the surface around the centre, this far apart |
 | `--edge-angle`      | 30      | faces meeting at a sharper angle than this get an edge beam |
 | `--min-plane-area`  | 6       | smaller flat areas are treated as curved |
+| `--pattern`         | flow    | curved surfaces: `flow` = staves along the shape, `rings` = horizontal rings |
+| `--no-roll`         | off     | don't roll beams flat onto the surface (saves 1–3 wheel notches per beam) |
+| `--no-fill`         | off     | skip the gap filler |
+| `--kps`             | 10      | typing speed in keystrokes per second |
 | `--no-merge`        | off     | keep collinear overlapping beams separate |
 
 The summary after each build shows these numbers:
-- **surface coverage:** the share of the model surface touched by a beam.
+- **surface coverage:** the share of the model surface hidden under a beam (within 0.6 m of
+  a beam's centre line). Anything else is a visible hole.
 - **mean deviation:** how far, on average, the surface is from the nearest beam.
 - **stray beam length:** how much of the beams sits more than 1 m off the surface.
 
@@ -157,13 +162,20 @@ is accurate to about 1.5°.
    - **Axis directions.** Nudge keys follow the camera. If the model comes out mirrored or
      rotated, swap the entries in `keys`.
    - **Macro.** If your game needs a different key order, edit `beam_macro`. Tokens:
-     `key:lock`, `nudge:shape`, `nudge:place`, `click`, `wait:0.5`.
+     `key:lock`, `nudge:shape`, `nudge:place`, `click`, `roll`, `wait:0.5`.
+   - **Roll.** Build a beam on a slope and compare it with the preview. If it's rolled the
+     wrong way, set `"roll_direction": -1`. `roll_step_deg` is 15 (6 wheel notches = 90°).
    - **Timing.** If key presses get lost, lower the typing speed (`--kps`, or the box in the
      preview) or raise `click_delay` / `beam_delay`.
    - **Limits.** `max_beam_length` (default 40 m, the in-game maximum) splits longer beams.
 4. **Keep the line of sight clear.** If a built beam ends up between your camera and the
    anchor, the crosshair hits that beam and the anchor moves. By default the model starts 2 m
    *beyond* the anchor (`auto_offset_gap`). You can also set `model_offset` to `[x, y, z]`.
+
+## Your own models
+
+Put models in the `models/` folder. It's in `.gitignore`, so models extracted from games
+(which you may only use privately) never get pushed.
 
 ## Tests
 

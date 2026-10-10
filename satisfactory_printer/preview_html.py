@@ -21,8 +21,10 @@ KIND_COLORS = {
     "outline": "#2f6fb5",
     "ring": "#4fc48a",
     "arc": "#d9c84a",
+    "stave": "#3fc1d9",
     "rib": "#b06be0",
     "edge": "#f2f2f2",
+    "fill": "#e8613d",
     "": "#cccccc",
 }
 
@@ -124,9 +126,12 @@ _TEMPLATE = r"""<!doctype html>
   <div id="live">
     <h2>Settings</h2>
     <label>Size (largest side) <output id="sizeOut"></output></label>
-    <input type="range" id="size" min="5" max="120" step="1">
+    <input type="range" id="size" min="5" max="200" step="1">
     <label>Mode
       <select id="mode" style="margin-left:auto"></select>
+    </label>
+    <label>Curved surfaces
+      <select id="pattern" style="margin-left:auto"><option value="flow">staves (along the shape)</option><option value="rings">rings</option></select>
     </label>
     <label>Tolerance <output id="tolOut"></output></label>
     <input type="range" id="tolerance" min="0.25" max="3" step="0.25">
@@ -213,12 +218,24 @@ function render(data) {
   // beams as instanced boxes
   inst = new THREE.InstancedMesh(boxGeo, new THREE.MeshLambertMaterial({ color: 0xffffff }), Math.max(N, 1));
   mats = []; lengths = [];
-  const q = new THREE.Quaternion(), up = new THREE.Vector3(0, 0, 1);
+  const q = new THREE.Quaternion();
   const lo = new THREE.Vector3(Infinity, Infinity, Infinity), hi = lo.clone().negate();
+  const rolls = data.rolls || [];
   B.forEach((b, i) => {
     const s = g2t(b[0], b[1], b[2]), e = g2t(b[3], b[4], b[5]);
     const dir = e.clone().sub(s), len = dir.length(); lengths.push(len);
-    q.setFromUnitVectors(up, dir.clone().normalize());
+    // orientation: box z along the beam, box x = the face the game points "up" at roll 0
+    // (same rule as orient.py), then rolled by the planned mouse-wheel notches
+    const z = dir.clone().normalize();
+    const g = new THREE.Vector3(b[3] - b[0], b[4] - b[1], b[5] - b[2]).normalize();  // game coords
+    let ref = null;
+    for (const r of [[0, 0, 1], [0, 1, 0], [1, 0, 0]]) {
+      const v = new THREE.Vector3(...r); v.addScaledVector(g, -v.dot(g));
+      if (v.length() > 0.2) { ref = v.normalize(); break; }
+    }
+    const x = g2t(ref.x, ref.y, ref.z).applyAxisAngle(z, (rolls[i] || 0) * Math.PI / 180);
+    const y = new THREE.Vector3().crossVectors(z, x);
+    q.setFromRotationMatrix(new THREE.Matrix4().makeBasis(x, y, z));
     const m = new THREE.Matrix4().compose(s.clone().add(e).multiplyScalar(0.5), q, new THREE.Vector3(1, 1, Math.max(len, 0.05)));
     mats.push(m); inst.setMatrixAt(i, m);
     lo.min(s); lo.min(e); hi.max(s); hi.max(e);
@@ -389,8 +406,10 @@ if (LIVE) {
   const p = LIVE.params;
   for (const m of LIVE.modes) { const o = document.createElement("option"); o.value = o.textContent = m; $("mode").append(o); }
   $("size").value = p.size; $("mode").value = p.mode; $("tolerance").value = p.tolerance; $("spacing").value = p.spacing;
+  $("pattern").value = p.pattern || "flow";
   liveParams = (extra = {}) => new URLSearchParams(Object.assign({ size: $("size").value, mode: $("mode").value,
-    tolerance: $("tolerance").value, spacing: $("spacing").value, kps: $("kps").value }, extra));
+    tolerance: $("tolerance").value, spacing: $("spacing").value, pattern: $("pattern").value,
+    kps: $("kps").value }, extra));
   const labels = () => {
     $("sizeOut").textContent = $("size").value + " m";
     $("tolOut").textContent = (+$("tolerance").value).toFixed(2) + " m";
@@ -414,6 +433,7 @@ if (LIVE) {
     $(id).addEventListener("input", () => { labels(); clearTimeout(timer); timer = setTimeout(rebuild, 300); });
   }
   $("mode").onchange = rebuild;
+  $("pattern").onchange = rebuild;
   $("save").onclick = async () => {
     status("saving…", true);
     try {
@@ -427,7 +447,7 @@ if (LIVE) {
 let polling = null;
 const RUNNING = ["ready", "countdown", "running", "paused"];
 function setLocked(locked) {
-  for (const id of ["size", "mode", "tolerance", "spacing", "kps", "progress", "startAt", "countdown", "simulate", "runStart", "save"])
+  for (const id of ["size", "mode", "pattern", "tolerance", "spacing", "kps", "progress", "startAt", "countdown", "simulate", "runStart", "save"])
     $(id).disabled = locked;
   $("runPause").disabled = $("runStop").disabled = !locked;
 }

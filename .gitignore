@@ -2,3 +2,6 @@ __pycache__/
 *.pyc
 out/
 .pytest_cache/
+
+# your own / extracted models: never pushed
+models/

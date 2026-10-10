@@ -60,12 +60,12 @@ def generate(tris, args, max_len: float):
             print(f"note: {int(curved.sum())} faces aren't part of a flat region - try --mode hybrid for those")
     elif mode == "contour":
         beams = surfaces.beams_from_contours(
-            tris, args.ring_spacing, args.rib_spacing, args.contour_axes, args.tolerance, max_len
+            tris, args.ring_spacing, args.rib_spacing, args.contour_axes, args.tolerance, max_len, args.pattern
         )
     else:
         beams = surfaces.beams_hybrid(
             topo, args.spacing, args.ring_spacing, args.rib_spacing, args.tolerance, max_len,
-            args.hatch, args.min_plane_area, args.edge_angle,
+            args.hatch, args.min_plane_area, args.edge_angle, pattern=args.pattern,
         )
     return beams, tris, None
 
@@ -93,13 +93,24 @@ def run_build(raw_tris: np.ndarray, args: argparse.Namespace, name: str = "model
     max_len = float(cfg["max_beam_length"])
     tris = scale_to_grid(raw_tris, size=args.size, scale=args.scale)
     beams, mesh, grid = generate(tris, args, max_len)
+    if args.mode in ("hybrid", "planes", "contour") and not getattr(args, "no_fill", False):
+        from .metrics import fill_gaps
+
+        beams = fill_gaps(beams, mesh, max_len)
     raw_count = len(beams)
     if not args.no_merge:
         beams = beam_mod.merge_collinear(beams, max_len)
     beams = beam_mod.sort_for_building(beams)
     if args.limit:
         beams = beams[: args.limit]
-    steps, offset, warnings = build_plan(beams, cfg) if beams else ([], (0, 0, 0), [])
+    rolls = None
+    if beams and cfg.get("roll", True) and not getattr(args, "no_roll", False):
+        from .orient import roll_steps
+
+        rolls = roll_steps(beams, mesh, float(cfg.get("roll_step_deg", 15)))
+    else:
+        cfg = {**cfg, "roll": False}
+    steps, offset, warnings = build_plan(beams, cfg, rolls) if beams else ([], (0, 0, 0), [])
     return BuildResult(name, args.mode, beams, mesh, grid, raw_count, steps, offset, warnings, cfg,
                        plan_to_text(steps) if steps else "")
 
@@ -166,6 +177,8 @@ def preview_data(res: BuildResult, stats: dict[str, str]) -> dict:
         title=f"{res.name} – {res.mode}",
     )
     data["timing"] = _timing(res)
+    step_deg = float(res.cfg.get("roll_step_deg", 15))
+    data["rolls"] = [s.roll * step_deg for s in res.steps]
     return data
 
 
@@ -250,6 +263,9 @@ def _add_build_options(b: argparse.ArgumentParser) -> None:
                    help="distance between contour slices (1 = closed surface, 2+ = open lattice)")
     g.add_argument("--rib-spacing", type=float, default=0.0,
                    help="add ribs: radial beams up the surface, this far apart at the widest point (0 = none)")
+    g.add_argument("--pattern", choices=["flow", "rings"], default="flow",
+                   help="curved surfaces: flow = staves running along each part (up a rocket body, along "
+                        "a twisted streak); rings = horizontal rings / arcs")
     g.add_argument("--contour-axes", default="auto",
                    help="contour mode: 'auto' picks the best slicing axis per face; or e.g. z (rings), xyz")
     g.add_argument("--edge-angle", type=float, default=30.0,
@@ -266,6 +282,10 @@ def _add_build_options(b: argparse.ArgumentParser) -> None:
     o.add_argument("--max-beam-length", type=float, help="override config max_beam_length (default 40)")
     o.add_argument("--kps", type=float, help="typing speed in keystrokes per second (default from config: 10)")
     o.add_argument("--no-merge", action="store_true", help="don't fuse collinear overlapping beams")
+    o.add_argument("--no-roll", action="store_true",
+                   help="don't roll beams with the mouse wheel to lie flat on the surface")
+    o.add_argument("--no-fill", action="store_true",
+                   help="surface modes: skip the final pass that patches every visible hole")
     o.add_argument("--no-metrics", action="store_true", help="skip the coverage/deviation measurement")
     o.add_argument("--limit", type=int, help="only emit the first N beams (for testing)")
 

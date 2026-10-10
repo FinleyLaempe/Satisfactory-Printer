@@ -1,4 +1,4 @@
-"""Generate small test models (STL): cube, pyramid, torus, house, ramp, sphere."""
+"""Generate small test models (STL): cube, pyramid, torus, house, ramp, sphere, rocket."""
 
 from pathlib import Path
 import sys
@@ -101,11 +101,38 @@ def sphere(n_lat=24, n_lon=48):
     return np.array(tris)
 
 
+def revolve(profile, segments=24):
+    """Surface of revolution around the z axis from (radius, z) profile points, capped."""
+    prof = np.asarray(profile, float)
+    ang = np.linspace(0, 2 * np.pi, segments, endpoint=False)
+    def p(i, j):
+        r, z = prof[i]
+        return np.array([r * np.cos(ang[j % segments]), r * np.sin(ang[j % segments]), z])
+    tris = []
+    for i in range(len(prof) - 1):
+        for j in range(segments):
+            tris.append([p(i, j), p(i + 1, j), p(i + 1, j + 1)])
+            tris.append([p(i, j), p(i + 1, j + 1), p(i, j + 1)])
+    for i, flip in ((0, True), (len(prof) - 1, False)):
+        c = np.array([0, 0, prof[i][1]])
+        for j in range(segments):
+            t = [c, p(i, j), p(i, j + 1)]
+            tris.append(t[::-1] if flip else t)
+    return np.array(tris)
+
+
+def rocket():
+    """A retro rocket body like the one in the reference photo (revolved profile)."""
+    return revolve([(2.0, 0), (3.2, 3), (3.4, 6), (2.4, 10), (2.6, 13), (3.6, 15), (3.8, 20),
+                    (3.4, 22), (2.6, 26), (1.2, 30), (0.3, 31)])
+
+
 if __name__ == "__main__":
+    save_stl_ascii(HERE / "rocket.stl", rocket())
     save_stl_ascii(HERE / "house.stl", house())
     save_stl_ascii(HERE / "ramp.stl", ramp())
     save_stl_ascii(HERE / "sphere.stl", sphere())
     save_stl_ascii(HERE / "cube.stl", cube())
     save_stl_ascii(HERE / "pyramid.stl", pyramid())
     save_stl_ascii(HERE / "torus.stl", torus())
-    print("wrote cube, pyramid, torus, house, ramp, sphere (.stl)")
+    print("wrote cube, pyramid, torus, house, ramp, sphere, rocket (.stl)")

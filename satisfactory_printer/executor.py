@@ -90,6 +90,28 @@ class _Backend:
             time.sleep(self.key_delay)
             self._mouse.release(self._button)
 
+    def scroll(self, notches: int) -> None:
+        """Mouse wheel, one notch at a time (+ = up). Rolls the beam while spanning."""
+        step = 1 if notches > 0 else -1
+        for _ in range(abs(notches)):
+            if getattr(self._pdi, "scroll", None):  # pydirectinput forks that support it
+                self._pdi.scroll(step)
+            else:
+                self._wheel(step)
+            time.sleep(self.key_delay)
+
+    def _wheel(self, step: int) -> None:
+        try:
+            from pynput import mouse  # type: ignore
+
+            if not hasattr(self, "_wheel_mouse"):
+                self._wheel_mouse = mouse.Controller()
+            self._wheel_mouse.scroll(0, step)
+        except ImportError:  # plain Windows API as a last resort
+            import ctypes
+
+            ctypes.windll.user32.mouse_event(0x0800, 0, 0, 120 * step, 0)  # MOUSEEVENTF_WHEEL
+
 
 class _NullBackend:
     """Simulation: honours all timings but presses nothing."""
@@ -105,6 +127,9 @@ class _NullBackend:
     def click(self) -> None:
         time.sleep(self.key_delay)
 
+    def scroll(self, notches: int) -> None:
+        time.sleep(self.key_delay * abs(notches))
+
 
 def beam_duration(beam: dict, key_delay: float, key_interval: float) -> float:
     """Seconds one beam takes to type."""
@@ -115,6 +140,8 @@ def beam_duration(beam: dict, key_delay: float, key_interval: float) -> float:
             t += a.times * (key_delay + key_interval)
         elif a.kind == "click":
             t += key_delay
+        elif a.kind == "scroll":
+            t += abs(a.times) * (key_delay + key_interval)
         else:
             t += a.seconds
     return t
@@ -239,6 +266,9 @@ class PlanRunner:
                         time.sleep(self.key_interval)
                 elif a.kind == "click":
                     backend.click()
+                elif a.kind == "scroll":
+                    backend.scroll(a.times)
+                    time.sleep(self.key_interval)
                 else:
                     time.sleep(a.seconds)
             self.index = i + 1
