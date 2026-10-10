@@ -259,7 +259,8 @@ def _cmd_blueprint(args: argparse.Namespace) -> int:
     tiles = bpmod.make_tiles(beams, normals, args.designer, inset=args.inset)
     out = Path(args.output)
     name = args.name or src.stem
-    results = bpmod.write_tiles(tiles, out, name, args.designer, args.bp_template, args.cost_per_m, max_len)
+    results = bpmod.write_tiles(tiles, out, name, args.designer, args.bp_template, args.cost_per_m, max_len,
+                                finish=args.finish)
     guide = bpmod.placement_guide(results, args.designer)
     (out / "PLACEMENT.txt").write_text(guide)
 
@@ -283,6 +284,9 @@ def _cmd_blueprint(args: argparse.Namespace) -> int:
     }
     data = make_preview_data(shown, mesh, (0, 0, 0), stats, [], title=f"{src.name} – blueprint")
     data["faces"] = faces
+    if args.finish:  # show the metal finish colour in the preview
+        tint = {"caterium": "#d9a833", "copper": "#c8743f", "chrome": "#c9ced6", "carbonsteel": "#4a4d52"}
+        data["colors"] = [tint[args.finish]] * len(data["kinds"])
     export_html(out / "preview.html", data)
     for k, v in stats.items():
         print(f"{k + ':':20s}{v}")
@@ -386,6 +390,8 @@ def _build_parser() -> argparse.ArgumentParser:
     bp.add_argument("--cost-per-m", type=float, default=0.25,
                     help="iron plates per metre of beam written into the blueprint cost list")
     bp.add_argument("--name", help="blueprint name (default: model file name)")
+    bp.add_argument("--finish", type=str.lower, choices=["caterium", "copper", "chrome", "carbonsteel"],
+                    help="metal paint finish for all beams, e.g. caterium (gold)")
     bp.add_argument("--open", action="store_true", help="open the preview in the browser")
     bp.set_defaults(func=_cmd_blueprint)
 

@@ -64,6 +64,10 @@ game and pass it with `--bp-template your.sbp`. Its exact beam object and game v
 then used. Try a small model (e.g. `examples/rocket.stl --size 30`) before a big one.
 The cost list in the file is an estimate (`--cost-per-m`, iron plates per metre).
 
+`--finish caterium` (or `copper`, `chrome`, `carbonsteel`) gives every beam that metal paint
+finish. It's stored the way the game stores it on buildings. The finish must be unlocked
+in the AWESOME Shop.
+
 ## Install
 
 ```

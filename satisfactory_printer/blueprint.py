@@ -31,6 +31,11 @@ WRITER_DIR = Path(__file__).parent / "blueprint_writer"
 DEFAULT_TEMPLATE = WRITER_DIR / "template" / "template.sbp"
 FOUNDATION_M = 8.0
 IRON_PLATE = "/Game/FactoryGame/Resource/Parts/IronPlate/Desc_IronPlate.Desc_IronPlate_C"
+_FINISH_DIR = "/Game/FactoryGame/Buildable/-Shared/Customization/PaintFinishes/Metals"
+FINISHES = {  # metal paint finishes (unlocked via the AWESOME Shop)
+    name: f"{_FINISH_DIR}/PaintFinishDesc_{name}.PaintFinishDesc_{name}_C"
+    for name in ("Caterium", "Copper", "Chrome", "CarbonSteel")
+}
 
 
 @dataclass
@@ -141,7 +146,7 @@ def check_node() -> str | None:
 
 
 def write_tiles(tiles: list[Tile], out: Path, name: str, designer: int, template: Path | None = None,
-                cost_per_m: float = 0.25, max_len: float = 40.0) -> list[dict]:
+                cost_per_m: float = 0.25, max_len: float = 40.0, finish: str | None = None) -> list[dict]:
     """Write one blueprint per tile. Returns a list of {file, tile, beams, origin_m}."""
     problem = check_node()
     if problem:
@@ -172,6 +177,7 @@ def write_tiles(tiles: list[Tile], out: Path, name: str, designer: int, template
             "description": f"Satisfactory Printer: {name} tile {t.index}" if multi else f"Satisfactory Printer: {name}",
             "designer": designer,
             "cost_per_m": [[IRON_PLATE, cost_per_m]] if cost_per_m > 0 else [],
+            "finish": {k.lower(): v for k, v in FINISHES.items()}[finish.lower()] if finish else None,
             "beams": rows,
         }
         spec_path = out / f".{bp_name}.spec.json"

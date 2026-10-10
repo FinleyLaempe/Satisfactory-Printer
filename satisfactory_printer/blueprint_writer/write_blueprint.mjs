@@ -10,6 +10,8 @@
 //   designer: 4 | 5 | 6,              // designer size in foundations (Mk1/Mk2/Mk3)
 //   beam_type_path, beam_recipe,      // optional overrides
 //   swatch,                           // optional swatch path
+//   finish,                           // optional paint finish path (e.g. Caterium); stored like
+//                                     // the game does: SwatchDesc + OverrideColorData.PaintFinish
 //   cost_per_m: [[itemPath, amount_per_metre], ...],
 //   beams: [[tx, ty, tz, qx, qy, qz, qw, length_cm], ...]   // Unreal coords, cm
 // }
@@ -49,6 +51,25 @@ if (!proto) {
   proto.trailingData = [];
 }
 
+if (spec.finish) {
+  // layout copied from real buildings with a metal finish (save files, game 1.1+)
+  const cust = proto.properties.mCustomizationData || {
+    type: 'StructProperty', name: 'mCustomizationData',
+    propertyTagType: { name: 'StructProperty', children: [{ name: 'FactoryCustomizationData', children: [{ name: '/Script/FactoryGame', children: [] }] }] },
+    value: { type: 'FactoryCustomizationData', properties: {} },
+  };
+  const ref = { levelName: '', pathName: spec.finish };
+  cust.value.properties.SwatchDesc = { type: 'ObjectProperty', name: 'SwatchDesc', propertyTagType: { name: 'ObjectProperty', children: [] }, value: ref };
+  cust.value.properties.OverrideColorData = {
+    type: 'StructProperty', name: 'OverrideColorData',
+    propertyTagType: { name: 'StructProperty', children: [{ name: 'FactoryCustomizationColorSlot', children: [{ name: '/Script/FactoryGame', children: [] }] }] },
+    value: { type: 'FactoryCustomizationColorSlot', properties: {
+      PaintFinish: { type: 'ObjectProperty', name: 'PaintFinish', propertyTagType: { name: 'ObjectProperty', children: [] }, value: { ...ref } },
+    } },
+  };
+  proto.properties.mCustomizationData = cust;
+}
+
 const objects = spec.beams.map((b, i) => {
   const o = clone(proto);
   o.instanceName = `Persistent_Level:PersistentLevel.${className}_${2147000000 - i}`;
@@ -80,4 +101,8 @@ fs.writeFileSync(spec.out.sbpcfg, Buffer.from(summary.configFileBinary));
 const check = Parser.ParseBlueprintFiles('check', read(spec.out.sbp), read(spec.out.sbpcfg));
 const n = check.objects.filter(o => o.typePath === BEAM).length;
 if (n !== spec.beams.length) throw new Error(`verification failed: wrote ${spec.beams.length} beams, read back ${n}`);
+if (spec.finish) {
+  const f = check.objects[0]?.properties?.mCustomizationData?.value?.properties?.OverrideColorData?.value?.properties?.PaintFinish?.value?.pathName;
+  if (f !== spec.finish) throw new Error('verification failed: paint finish not stored');
+}
 console.log(JSON.stringify({ ok: true, beams: n, fromRealBeam, saveVersion: check.header.saveVersion }));
