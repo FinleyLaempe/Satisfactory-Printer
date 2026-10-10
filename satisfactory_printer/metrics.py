@@ -215,7 +215,7 @@ def fill_gaps(beams: list[Beam], tris: np.ndarray, max_len: float = 40, rounds: 
     out = list(beams)
     for r in range(rounds):
         # fresh sample points every round, so small holes can't hide between samples
-        surface = sample_surface(tris, density=16, max_points=500_000, seed=100 + r)
+        surface = sample_surface(tris, density=16, max_points=2_000_000, seed=100 + r)
         d = nearest_distance(surface, sample_beams(out), cell=COVERED + 0.01)
         holes = surface[d > COVERED]
         if not len(holes):
