@@ -1,0 +1,20 @@
+{
+  "keys": {
+    "+x": "right",
+    "-x": "left",
+    "+y": "up",
+    "-y": "down",
+    "+z": "pageup",
+    "-z": "pagedown",
+    "lock": "h"
+  },
+  "beam_macro": ["key:lock", "nudge:shape", "click", "key:lock", "nudge:place", "click"],
+  "model_offset": "auto",
+  "auto_offset_gap": 2,
+  "key_delay": 0.05,
+  "key_interval": 0.05,
+  "click_delay": 0.25,
+  "beam_delay": 0.3,
+  "max_beam_length": 12,
+  "max_nudge": 0
+}
