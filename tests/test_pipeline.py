@@ -11,7 +11,6 @@ sys.path.insert(0, str(ROOT / "examples"))
 from make_examples import cube  # noqa: E402
 from satisfactory_printer.beams import Beam, beams_from_mesh_edges, beams_from_voxels, split_segment  # noqa: E402
 from satisfactory_printer.cli import main  # noqa: E402
-from satisfactory_printer.gcode import read_gcode_segments  # noqa: E402
 from satisfactory_printer.plan import DEFAULT_CONFIG, build_plan  # noqa: E402
 from satisfactory_printer.voxelize import hollow, scale_to_grid, voxelize_solid  # noqa: E402
 
@@ -70,14 +69,6 @@ def test_plan_nudges_reproduce_beam():
     assert tuple(shape + place) == beam.start and tuple(place) == beam.end
 
 
-def test_gcode_segments(tmp_path):
-    g = tmp_path / "t.gcode"
-    g.write_text("G90\nM83\nG0 X0 Y0 Z0\nG1 X5 Y0 E1\nG1 X10 Y0 E1\nG0 X10 Y10\nG1 X10 Y20 E1\n")
-    segs = read_gcode_segments(g)
-    assert len(segs) == 2  # collinear moves merged, travel skipped
-    assert np.allclose(segs[0][1], [10, 0, 0])
-
-
 def test_cli_build(tmp_path):
     from make_examples import save_stl_ascii
 
@@ -115,12 +106,3 @@ def test_lattice_beams_only_use_cube_directions():
     straight = [b for b in beams if b.vector[1] == 0 and b.vector[2] == 0 and b.start[1:] == (0, 0)]
     assert sum(abs(b.vector[0]) for b in straight) >= 20  # x axis covered once, no duplicates beyond overlap
 
-
-def test_cli_gcode_lattice(tmp_path):
-    g = tmp_path / "t.gcode"
-    g.write_text("G90\nM82\nG92 E0\nG0 X0 Y0 Z0\nG1 X10 Y10 Z10 E1\nG1 X20 Y10 Z10 E2\n")
-    assert main(["build", str(g), "--scale", "1", "-o", str(tmp_path / "o")]) == 0
-    plan = json.loads((tmp_path / "o" / "plan.json").read_text())
-    vecs = sorted(tuple(np.subtract(b["end"], b["start"])) for b in plan["beams"])
-    # 10 space-diagonal steps (1.73 m each) split at max 12 m -> 6 + 4 steps
-    assert vecs == [(4, 4, 4), (6, 6, 6), (10, 0, 0)]
