@@ -1,7 +1,9 @@
 """Beam roll: turn each beam around its own axis so a flat face lies on the surface.
 
 In-game the mouse wheel rolls the beam while it is being spanned (6 notches = 90°, so 15°
-per notch). A beam's square cross-section looks the same every 90°, so the roll needed is
+per notch). Wheel up turns the beam counter-clockwise seen from its end looking back at its
+start - for a beam pointing up, counter-clockwise seen from above - i.e. a positive
+(right-hand) turn about start->end. A beam's square cross-section looks the same every 90°, so the roll needed is
 always between -45° and +45°, i.e. at most 3 notches either way.
 
 Reference orientation (roll 0) is assumed to be the game's default: one face points "up" -

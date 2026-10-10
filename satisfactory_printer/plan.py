@@ -66,10 +66,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "beam_delay": 0.3,  # pause after each beam
     "max_beam_length": 40,  # longest beam the game allows (m)
     "max_nudge": 0,  # 0 = no limit; otherwise warn when one axis needs more nudges
-    # beam roll with the mouse wheel while spanning: 6 notches = 90°
+    # beam roll with the mouse wheel while spanning: 6 notches = 90°. Wheel up turns the beam
+    # counter-clockwise when looking down its axis from its end towards its start (a beam
+    # pointing up, seen from above) = positive turn about start->end.
     "roll": True,
     "roll_step_deg": 15,
-    "roll_direction": 1,  # -1 if the game turns the other way than the preview
+    "roll_direction": 1,  # -1 would mean wheel up turns clockwise
 }
 
 
@@ -167,11 +169,12 @@ def build_plan(
         beam = raw.translated(offset)
         # the end that is placed last gets nudged from the anchor: use the nearer end
         # (the same beam drawn the other way round; roll is symmetric for a square beam)
+        roll = (rolls[i] if rolls else 0) if cfg.get("roll", True) else 0
         if sum(map(abs, beam.start)) < sum(map(abs, beam.end)):
             beam = Beam(beam.end, beam.start, beam.kind)
+            roll = -roll  # same physical turn about the reversed axis
         shape = tuple(s - e for s, e in zip(beam.start, beam.end))
         place = beam.end
-        roll = (rolls[i] if rolls else 0) if cfg.get("roll", True) else 0
         step = BeamStep(i, beam, roll=roll)
         for token in cfg["beam_macro"]:
             kind, _, arg = token.partition(":")

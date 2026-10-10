@@ -285,3 +285,32 @@ def test_runner_pause_and_stop_between_beams():
     r.stop()
     time.sleep(0.2)
     assert r.status == "stopped" and 0 < r.index < 200
+
+
+def test_planned_wheel_notches_turn_a_face_onto_the_surface():
+    """Simulate the game: wheel up = positive (counter-clockwise from the tip) turn about the
+    drawn start->end axis, starting from the reference face. The resulting face must lie
+    flat on a 30° roof - also for beams the plan draws reversed."""
+    from satisfactory_printer.orient import reference_face, roll_steps
+
+    ang = np.radians(30)
+    normal = np.array([0, -np.sin(ang), np.cos(ang)])
+    tri = np.array([[[-80, -80, 0], [80, -80, 0], [0, 10 * np.cos(ang), 10 * np.sin(ang)]]], float)
+    tri[0, :2, 1] = 0
+    tri[0, :2, 2] = 0
+    beams = [Beam((0, 2, 1), (10, 2, 1)), Beam((10, 2, 1), (0, 2, 1))]  # same beam, both ways
+    rolls = roll_steps(beams, tri)
+    cfg = dict(DEFAULT_CONFIG, model_offset=[30, 5, 0])  # far from the anchor
+    steps, _, _ = build_plan(beams, cfg, rolls)
+
+    def rotate(v, axis, deg):
+        a = np.radians(deg)
+        return v * np.cos(a) + np.cross(axis, v) * np.sin(a) + axis * (axis @ v) * (1 - np.cos(a))
+
+    for st in steps:
+        notches = sum(a.times for a in st.actions if a.kind == "scroll")
+        axis = np.subtract(st.beam.end, st.beam.start).astype(float)
+        axis /= np.linalg.norm(axis)
+        face = rotate(reference_face(axis), axis, 15 * notches)
+        c = abs(face @ normal)
+        assert c > 0.99 or c < 0.01  # one face (or its neighbour at 90°) lies on the roof

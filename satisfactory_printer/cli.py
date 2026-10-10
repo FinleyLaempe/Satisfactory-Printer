@@ -178,7 +178,12 @@ def preview_data(res: BuildResult, stats: dict[str, str]) -> dict:
     )
     data["timing"] = _timing(res)
     step_deg = float(res.cfg.get("roll_step_deg", 15))
-    data["rolls"] = [s.roll * step_deg for s in res.steps]
+    # preview draws the beams start->end as generated; the plan may have drawn a beam the
+    # other way round (nearer end last), which flips the sign of its roll
+    data["rolls"] = [
+        (s.roll if s.beam.start == b.translated(res.offset).start else -s.roll) * step_deg
+        for s, b in zip(res.steps, res.beams)
+    ]
     return data
 
 
