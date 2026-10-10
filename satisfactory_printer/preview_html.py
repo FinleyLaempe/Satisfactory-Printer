@@ -233,7 +233,10 @@ function render(data) {
       const v = new THREE.Vector3(...r); v.addScaledVector(g, -v.dot(g));
       if (v.length() > 0.2) { ref = v.normalize(); break; }
     }
-    const x = g2t(ref.x, ref.y, ref.z).applyAxisAngle(z, (rolls[i] || 0) * Math.PI / 180);
+    const f = data.faces && data.faces[i];
+    const x = (f && (f[0] || f[1] || f[2]))
+      ? g2t(f[0], f[1], f[2]).addScaledVector(z, -g2t(f[0], f[1], f[2]).dot(z)).normalize()  // exact (blueprint)
+      : g2t(ref.x, ref.y, ref.z).applyAxisAngle(z, (rolls[i] || 0) * Math.PI / 180);
     const y = new THREE.Vector3().crossVectors(z, x);
     q.setFromRotationMatrix(new THREE.Matrix4().makeBasis(x, y, z));
     const m = new THREE.Matrix4().compose(s.clone().add(e).multiplyScalar(0.5), q, new THREE.Vector3(1, 1, Math.max(len, 0.05)));

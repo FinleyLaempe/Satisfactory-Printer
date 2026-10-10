@@ -143,6 +143,12 @@ def _patch_beam(pts: np.ndarray, max_len: float, normal: np.ndarray | None = Non
         mid = (lo + hi) / 2
         lo, hi = mid - 0.5, mid + 0.5
     a, b = c + lo * axis, c + hi * axis
+    from . import beams as beams_mod
+
+    if beams_mod.PRECISE:  # exact positions allowed: lay the patch right along the crack
+        from .beams import split_segment
+
+        return split_segment(a, b, max_len, "fill")
     # try every grid corner around both ends, keep the beam that hides the cluster best
     ca = np.floor(a) + _CORNERS
     cb = np.floor(b) + _CORNERS

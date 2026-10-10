@@ -1,0 +1,9 @@
+{
+  "name": "satisfactory-printer-blueprint-writer",
+  "private": true,
+  "type": "module",
+  "description": "Writes Satisfactory blueprint files for satisfactory_printer (uses @etothepii/satisfactory-file-parser, MIT)",
+  "dependencies": {
+    "@etothepii/satisfactory-file-parser": "4.1.2"
+  }
+}

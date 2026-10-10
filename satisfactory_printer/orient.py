@@ -82,3 +82,42 @@ def _roll_range(tris: np.ndarray, ends: np.ndarray, step_deg: float) -> list[int
         ang = (ang + 45) % 90 - 45  # square cross-section: every 90° looks the same
         out.append(int(max(-max_steps, min(max_steps, round(ang / step_deg)))))
     return out
+
+
+def face_normals(beams: list[Beam], tris: np.ndarray) -> np.ndarray:
+    """Per beam: unit vector perpendicular to the beam pointing out of the surface (or 0).
+
+    Used for exact blueprint rotations: one beam face is turned to exactly this direction.
+    """
+    if not len(tris) or not beams:
+        return np.zeros((len(beams), 3))
+    tris = np.asarray(tris, dtype=float)
+    ends = np.array([[b.start, b.end] for b in beams], dtype=float)
+    jobs = [(tris, ends[sl]) for sl in parallel.chunks(len(beams), min_size=500)]
+    return np.concatenate(parallel.pmap(_normals_range, jobs))
+
+
+def _normals_range(tris: np.ndarray, ends: np.ndarray) -> np.ndarray:
+    cent = tris.mean(axis=1)
+    nrm = np.cross(tris[:, 1] - tris[:, 0], tris[:, 2] - tris[:, 0])
+    nrm /= np.maximum(np.linalg.norm(nrm, axis=1, keepdims=True), 1e-12)
+    cell = 3.0
+    cells: dict[tuple, list[int]] = {}
+    for i, k in enumerate(map(tuple, np.floor(cent / cell).astype(int).tolist())):
+        cells.setdefault(k, []).append(i)
+    offs = [(dx, dy, dz) for dx in (-1, 0, 1) for dy in (-1, 0, 1) for dz in (-1, 0, 1)]
+    out = np.zeros((len(ends), 3))
+    for row, (s, e) in enumerate(ends):
+        axis = (e - s) / max(np.linalg.norm(e - s), 1e-9)
+        acc = np.zeros(3)
+        for t in (0.15, 0.5, 0.85):
+            p = s + (e - s) * t
+            k = np.floor(p / cell).astype(int)
+            cand = [i for o in offs for i in cells.get((k[0] + o[0], k[1] + o[1], k[2] + o[2]), ())]
+            if cand:
+                n = nrm[cand[int(np.argmin(np.linalg.norm(cent[cand] - p, axis=1)))]]
+                acc += n  # mesh normals point outwards on a well-formed model
+        m = acc - (acc @ axis) * axis
+        if np.linalg.norm(m) > 1e-6:
+            out[row] = m / np.linalg.norm(m)
+    return out

@@ -31,6 +31,39 @@ point: the **anchor**. Every beam is then built from the anchor using only keys:
 The sequence is the `beam_macro` setting in the config, so you can change it if the game
 behaves differently (see *Calibration*).
 
+## Blueprints: exact and built with one click
+
+Instead of typing keys, `blueprint` writes Satisfactory blueprint files (`.sbp` + `.sbpcfg`).
+A blueprint stores each beam's exact position, rotation and length, so:
+
+- **no 1 m grid:** beams lie exactly on the surface, with no staircases or jitter;
+- **exact rotation:** every beam is turned so a flat face lies on the surface (no wheel
+  steps), and beams are moved half a beam inwards so their outer face is the model surface;
+- **no typing:** you open the blueprint in the build menu and place it.
+
+```bash
+npm install --prefix satisfactory_printer/blueprint_writer   # once (needs Node.js, https://nodejs.org)
+python -m satisfactory_printer blueprint model.stl --size 40 -o out_bp --open
+```
+
+Copy the `.sbp`/`.sbpcfg` files to
+`%LOCALAPPDATA%\FactoryGame\Saved\SaveGames\blueprints\<your session name>\` and restart
+or reload the game. `PLACEMENT.txt` lists the tiles.
+
+**The size limit.** The blueprint designer is at most 6×6×6 foundations (Mk3 = 48 m;
+`--designer 4|5` for Mk1/Mk2). Larger models are cut into tiles (beams are split at the
+borders). Place tile `0_0_0`, then each other tile *i* tiles right, *j* forward and *k* up,
+snapped to the foundation grid. Placing a blueprint needs all its material at once.
+
+**Not yet tested in the game.** The file format comes from
+[satisfactory-file-parser](https://github.com/etothepii4/satisfactory-file-parser) (MIT, game
+versions 1.0–1.2). The beam layout (anchored at its start, extending along local X, length
+in `mLength`) is taken from real save files. The bundled template is a 1.2 blueprint
+without beams. For the safest result, make a small blueprint with one painted beam in your
+game and pass it with `--bp-template your.sbp`. Its exact beam object and game version are
+then used. Try a small model (e.g. `examples/rocket.stl --size 30`) before a big one.
+The cost list in the file is an estimate (`--cost-per-m`, iron plates per metre).
+
 ## Install
 
 ```

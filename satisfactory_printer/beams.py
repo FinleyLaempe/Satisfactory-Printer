@@ -45,6 +45,23 @@ class Beam:
         return self if self.start <= self.end else Beam(self.end, self.start, self.kind)
 
 
+# Precise mode (blueprint export): endpoints are NOT snapped to the 1 m nudge grid. A blueprint
+# stores exact positions, so beams can sit exactly on the surface.
+PRECISE = False
+
+
+def set_precise(on: bool) -> None:
+    global PRECISE
+    PRECISE = bool(on)
+
+
+def _snap(p) -> tuple:
+    """Grid point for keystroke plans; exact point (rounded to 1 mm) in precise mode."""
+    if PRECISE:
+        return tuple(round(float(c), 3) for c in p)
+    return tuple(int(math.floor(float(c) + 0.5)) for c in p)
+
+
 def _ivec(p) -> Vec:
     return (int(p[0]), int(p[1]), int(p[2]))
 
@@ -153,7 +170,8 @@ def polyline_to_beams(
     points: np.ndarray, tol: float, max_len: float, kind: str, closed: bool = False
 ) -> list[Beam]:
     """Snap a dense polyline to the grid, straighten it within `tol` and cut it into beams."""
-    pts = np.floor(np.asarray(points, dtype=float) + 0.5).astype(int)
+    pts = np.asarray(points, dtype=float)
+    pts = np.round(pts, 3) if PRECISE else np.floor(pts + 0.5).astype(int)
     if len(pts) == 0:
         return []
     keep = np.ones(len(pts), dtype=bool)
@@ -163,7 +181,9 @@ def polyline_to_beams(
         pts = pts[:-1]
     if len(pts) < 2:
         return []
-    simple = simplify_polyline(pts, tol, closed=closed).astype(int)
+    simple = simplify_polyline(pts, tol, closed=closed)
+    if not PRECISE:
+        simple = simple.astype(int)
     if closed and len(simple) > 2:
         simple = np.vstack([simple, simple[:1]])
     beams: list[Beam] = []
@@ -180,7 +200,7 @@ def split_segment(start: np.ndarray, end: np.ndarray, max_len: float, kind: str 
     pieces = max(int(math.ceil(length / max_len)), 1) if max_len > 0 else 1
     # Rounding can push a piece slightly over max_len; add pieces until it fits.
     while True:
-        pts = [_ivec(np.floor(start + (end - start) * k / pieces + 0.5)) for k in range(pieces + 1)]
+        pts = [_snap(start + (end - start) * k / pieces) for k in range(pieces + 1)]
         beams = [Beam(p, q, kind) for p, q in zip(pts, pts[1:]) if p != q]
         if max_len <= 0 or all(b.length <= max_len + 1e-9 for b in beams) or pieces > 1000:
             return beams
@@ -280,6 +300,15 @@ def beams_from_voxels(
 
 def merge_collinear(beams: list[Beam], max_len: float = 40) -> list[Beam]:
     """Remove duplicates and fuse beams that lie on the same line and overlap or touch."""
+    if any(isinstance(c, float) and not float(c).is_integer() for b in beams[:200] for c in b.start + b.end):
+        # precise (non-grid) beams: only drop exact duplicates
+        seen, out = set(), []
+        for b in beams:
+            k = b.canonical()
+            if k not in seen and b.length > 1e-6:
+                seen.add(k)
+                out.append(b)
+        return out
     lines: dict[tuple, list[tuple[float, float, Beam]]] = {}
     for b in beams:
         v = np.array(b.vector, dtype=int)

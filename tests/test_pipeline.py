@@ -328,3 +328,76 @@ def test_parallel_matches_serial():
         assert np.array_equal(serial, metrics.nearest_distance(q, t, 0.61))
     finally:
         parallel.set_workers(None)
+
+
+# --------------------------------------------------------------------------- blueprint export
+
+
+def test_quaternion_puts_local_x_on_the_beam_and_z_on_the_surface():
+    from satisfactory_printer.blueprint import quat_from_axes
+
+    def rot(q, v):
+        x, y, z, w = q
+        u = np.array([x, y, z])
+        return v + 2 * w * np.cross(u, v) + 2 * np.cross(u, np.cross(u, v))
+
+    rng = np.random.default_rng(5)
+    for _ in range(50):
+        d = rng.normal(size=3)
+        n = rng.normal(size=3)
+        q = quat_from_axes(d, n)
+        assert abs(np.linalg.norm(q) - 1) < 1e-9
+        assert np.allclose(rot(q, np.array([1.0, 0, 0])), d / np.linalg.norm(d), atol=1e-9)
+        zl = rot(q, np.array([0, 0, 1.0]))
+        n_perp = n - (n @ d) * d / (d @ d)
+        assert np.allclose(zl, n_perp / np.linalg.norm(n_perp), atol=1e-9)
+
+
+def test_real_save_beam_convention():
+    """A vertical beam from a real save: rotation (-0.707, 0, -0.707, 0) maps local X to +Z."""
+    from satisfactory_printer.blueprint import quat_from_axes
+
+    q = quat_from_axes(np.array([0, 0, 1.0]), np.array([1.0, 0, 0]))
+    x, y, z, w = q
+    u = np.array([x, y, z])
+    v = np.array([1.0, 0, 0])
+    assert np.allclose(v + 2 * w * np.cross(u, v) + 2 * np.cross(u, np.cross(u, v)), [0, 0, 1])
+
+
+def test_tiles_split_beams_at_designer_borders():
+    from satisfactory_printer.blueprint import make_tiles
+
+    beams = [Beam((0.0, 0.0, 1.0), (100.0, 0.0, 1.0)), Beam((1.0, 1.0, 0.0), (1.0, 1.0, 10.0))]
+    normals = np.array([[0, 0, 1.0], [1.0, 0, 0]])
+    tiles = make_tiles(beams, normals, designer=6, inset=0)
+    size = 48
+    total = 0.0
+    for t in tiles:
+        for s, e, _ in t.beams:
+            local_s, local_e = s - t.origin, e - t.origin
+            for p in (local_s, local_e):  # inside the designer box (origin = centre of the floor)
+                assert -size / 2 - 1e-6 <= p[0] <= size / 2 + 1e-6 and -size / 2 - 1e-6 <= p[1] <= size / 2 + 1e-6
+                assert -1e-6 <= p[2] <= size + 1e-6
+            total += np.linalg.norm(e - s)
+    assert abs(total - 110) < 1e-6  # nothing lost when splitting
+
+
+def test_blueprint_files_roundtrip(tmp_path):
+    import shutil
+
+    import pytest
+
+    from satisfactory_printer import blueprint as bpmod
+
+    if bpmod.check_node():
+        pytest.skip("node / blueprint writer not installed")
+    stl = tmp_path / "rocket.stl"
+    from make_examples import rocket
+
+    save_stl_ascii(stl, rocket())
+    out = tmp_path / "bp"
+    assert main(["blueprint", str(stl), "--size", "20", "-o", str(out)]) == 0
+    sbp = list(out.glob("*.sbp"))
+    assert sbp and all(p.with_suffix(".sbpcfg").exists() for p in sbp)
+    assert (out / "PLACEMENT.txt").exists() and (out / "preview.html").exists()
+    shutil.rmtree(out)

@@ -18,6 +18,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from . import beams as beams_mod
 from . import parallel
 from .beams import Beam, beams_from_segments_lattice, polyline_to_beams, split_segment
 
@@ -590,7 +591,8 @@ def beams_from_contours(
         levels = list(range(int(math.floor(s_lv.min())), int(math.ceil(s_lv.max())) + 1, step))
         # independent slices: spread them over the CPU cores in batches
         for k in range(0, len(levels), 16):
-            jobs.append((sub, u, levels[k:k + 16], float(lv.min()), float(lv.max()), tol, max_len, kind))
+            jobs.append((sub, u, levels[k:k + 16], float(lv.min()), float(lv.max()), tol, max_len, kind,
+                         beams_mod.PRECISE))
     for part in parallel.pmap(_slice_levels, jobs):
         beams += part
 
@@ -614,8 +616,11 @@ def beams_from_contours(
     return beams
 
 
-def _slice_levels(sub, u, levels, lo_l, hi_l, tol, max_len, kind) -> list[Beam]:
+def _slice_levels(sub, u, levels, lo_l, hi_l, tol, max_len, kind, precise=False) -> list[Beam]:
     """Cut `sub` with the planes u . x = level for each level and straighten into beams."""
+    from . import beams as beams_mod
+
+    beams_mod.set_precise(precise)  # runs in a worker process: carry the mode over
     u_arr = np.array(u, dtype=float)
     norm = float(np.linalg.norm(u_arr))
     normal = u_arr / norm
